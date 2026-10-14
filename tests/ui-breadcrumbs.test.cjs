@@ -40,3 +40,19 @@ test('a slow previous listing cannot overwrite newer breadcrumb navigation',asyn
 test('refresh and pagination retain the current breadcrumb path',async()=>{
  const h=await setup();h.setResponder(async req=>({Objects:[],Next:req.Token?'':'next-page'}));await h.go('parent/child/');await h.get('more').click();assert.equal(h.requests.at(-1).Token,'next-page');assert.equal(h.requests.at(-1).Prefix,'parent/child/');await h.get('refresh').click();assert.equal(h.requests.at(-1).Token,'');assert.deepEqual(h.crumbs().map(e=>e.textContent),['bucket-a','parent','child']);
 });
+
+test('prefix search queries storage, preserves breadcrumbs, and resets when navigating',async()=>{
+ const h=await setup();await h.go('folder/');h.get('object-search').value='report';await h.get('object-search-form').onsubmit({preventDefault(){}});
+ assert.equal(h.requests.at(-1).Prefix,'folder/report');assert.deepEqual(h.crumbs().map(e=>e.textContent),['bucket-a','folder']);
+ await h.get('clear-search').click();assert.equal(h.requests.at(-1).Prefix,'folder/');
+ h.get('object-search').value='again';await h.get('object-search-form').onsubmit({preventDefault(){}});await h.crumbs()[0].click();assert.equal(h.requests.at(-1).Prefix,'');assert.equal(h.get('object-search').value,'');
+});
+test('column sorting preserves explicit selection and reports loaded scope',async()=>{
+ const h=await setup();h.setResponder(async()=>({Objects:[{Key:'b',Size:1,Folder:false},{Key:'a',Size:20,Folder:false}],Next:'next'}));await h.get('refresh').click();
+ assert.equal(h.get('objects').children[0].children[1].textContent,'a');
+ const radio=h.get('objects').children[0].children[0].children[0];await radio.onclick({stopPropagation(){}});assert.equal(h.get('selection-count').textContent,'1 file selected');
+ h.get('sort-size').click();assert.equal(h.get('objects').children[0].children[1].textContent,'b');assert.match(h.get('details').textContent,/Selected: a/);assert.equal(h.get('objects').children[1].children[0].children[0].checked,true);
+ assert.match(h.get('sort-scope').textContent,/loaded entries only/);assert.equal(h.get('object-count').textContent,'(2+)');
+ h.get('sort-size').click();assert.equal(h.get('objects').children[0].children[1].textContent,'a');
+ await h.get('profiles').children[1].click();assert.equal(h.get('object-count').textContent,'(0)');assert.equal(h.get('selection-count').textContent,'No file selected');
+});
