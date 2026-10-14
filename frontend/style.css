@@ -3,3 +3,5 @@
 #objects tr{cursor:pointer}#objects tr.selected,#objects tr.selected:hover{background:#d7eafa;color:#102f4d}#objects tr.selected td:first-child{box-shadow:inset 4px 0 #1668a6;font-weight:600}#objects tr:focus-visible{outline:2px solid #1668a6;outline-offset:-2px}aside button.active{background:#d7eafa;border-color:#1668a6;box-shadow:inset 3px 0 #1668a6;font-weight:600}button:disabled{opacity:.45;cursor:not-allowed}
 
 nav{flex-wrap:wrap}nav input{min-width:180px}aside{flex-shrink:0}
+
+#location{font-weight:600;color:#23485d;overflow-wrap:anywhere}
