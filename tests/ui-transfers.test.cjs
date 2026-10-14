@@ -58,4 +58,11 @@ test('terminal transfers refresh once, preserve selection, and report failures a
 
  transfers[0].SaveError='Permission denied';await context.transfers();assert.match(downloadRow.children[2].textContent,/Save failed: Permission denied/);
  transfers=[{...transfer,ID:'elsewhere',Bucket:'other-bucket'}];await context.transfers();assert.equal(browseCalls,4,'unrelated bucket must not replace current view');
+ get('path').value='first folder/second/';await get('go').click();
+ assert.deepEqual(get('location').children.map(e=>e.textContent),['bucket','›','first folder','›','second']);
+ await get('location').children[2].click();assert.equal(get('path').value,'first folder/');
+ await get('location').children[0].click();assert.equal(get('path').value,'');
+ get('path').value='first//last/';await get('go').click();await get('location').children[4].click();assert.equal(get('path').value,'first//','preserve exact S3 prefixes');
+ await get('profiles').children[0].click();assert.equal(get('location').children.length,0,'clear stale breadcrumbs when switching connections');
+
 });
