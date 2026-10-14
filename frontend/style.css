@@ -5,3 +5,5 @@
 nav{flex-wrap:wrap}nav input{min-width:180px}aside{flex-shrink:0}
 
 #location{font-weight:600;color:#23485d;overflow-wrap:anywhere}
+
+#delete:not(:disabled){color:#a52c2c;border-color:#cd9b9b}#delete:not(:disabled):hover{background:#fff0f0}

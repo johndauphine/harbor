@@ -494,3 +494,31 @@ func (a *App) CreateFolder(profile, bucket, prefix, name string) (string, error)
 	}
 	return key, nil
 }
+
+// DeleteFile deletes exactly one selected object, never a prefix or bucket.
+func (a *App) DeleteFile(profile, bucket, key, etag string) (string, error) {
+	if bucket == "" || key == "" || strings.HasSuffix(key, "/") {
+		return "", errors.New("Select a file; folder deletion is not supported")
+	}
+	if etag == "" || etag == "*" {
+		return "", errors.New("Refresh the listing and select the file again")
+	}
+	ctx, cancel := context.WithTimeout(a.ctx, 30*time.Second)
+	defer cancel()
+	c, err := a.client(ctx, profile)
+	if err != nil {
+		return "", err
+	}
+	current, err := c.HeadObject(ctx, &s3.HeadObjectInput{Bucket: aws.String(bucket), Key: aws.String(key), IfMatch: aws.String(etag)})
+	if err != nil {
+		return "", fmt.Errorf("Could not verify selected file; refresh before deleting: %w", err)
+	}
+	if aws.ToString(current.ETag) != etag {
+		return "", errors.New("The file changed after selection; refresh before deleting")
+	}
+	_, err = c.DeleteObject(ctx, &s3.DeleteObjectInput{Bucket: aws.String(bucket), Key: aws.String(key), IfMatch: aws.String(etag)})
+	if err != nil {
+		return "", fmt.Errorf("Delete failed; refresh the listing before trying again: %w", err)
+	}
+	return key, nil
+}

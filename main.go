@@ -160,6 +160,7 @@ func webHandler(a *App, host, token string) http.Handler {
 			Token     string
 			ID        string
 			Key       string
+			ETag      string
 		}
 		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 			http.Error(w, "Invalid request", 400)
@@ -176,6 +177,8 @@ func webHandler(a *App, host, token string) http.Handler {
 			value, err = a.TestConnection(in.ProfileID)
 		case "/api/buckets":
 			value, err = a.Buckets(in.ProfileID)
+		case "/api/delete-file":
+			value, err = a.DeleteFile(in.ProfileID, in.Bucket, in.Key, in.ETag)
 		case "/api/create-folder":
 			value, err = a.CreateFolder(in.ProfileID, in.Bucket, in.Prefix, in.Key)
 		case "/api/browse":

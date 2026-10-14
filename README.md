@@ -38,3 +38,9 @@ Default: `.harbor/profiles.db` under the current user home directory on both mac
 Verified against official MinIO release `RELEASE.2025-10-15T17-29-55Z`, built with `CGO_ENABLED=0` on Apple Silicon. A local HTTPS endpoint with a private test CA passed bucket listing, folder-marker creation and overwrite protection, multipart upload (6.75 MB), folder browsing, and byte-identical download. The SDK emitted a multipart-checksum validation warning; the test independently compared all downloaded bytes.
 
 An opt-in test is available: `HARBOR_MINIO_TEST=1 go test -race -run TestLocalMinIOIntegration -v .`. It requires a saved `MinIO Local` connection pointing to `https://127.0.0.1:59000`, path-style addressing, and its CA certificate. It creates a uniquely named test bucket and retains sample objects for manual browsing. It does not target AWS profiles.
+
+## Single-file deletion
+
+Select a file and use Delete file. Confirmation shows its bucket and full key. Harbor checks the current ETag before deletion and sends an If-Match condition. No recursive folder or bucket deletion is implemented. Versioning and retention rules determine whether a delete marker is created or a file is permanently removed; version management is not yet exposed.
+
+The local MinIO release ignores If-Match on DeleteObject, so its preflight catches stale selections but cannot prevent a concurrent replacement between the check and delete. The live local test verifies stale-selection rejection and deletion using only a disposable generated object. No AWS objects were deleted during development.
