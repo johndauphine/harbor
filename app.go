@@ -246,6 +246,24 @@ func (a *App) SaveProfile(p Profile, secret Secret) (Profile, error) {
 	a.profiles = next
 	return p, nil
 }
+
+var (
+	errS3HTTPSRequired = errors.New("S3 requests require HTTPS")
+	errS3Redirect      = errors.New("S3 endpoint redirects are not allowed; configure the final HTTPS endpoint")
+)
+
+type httpsOnlyTransport struct {
+	*http.Transport
+}
+
+func (t httpsOnlyTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	// Check the resolved URL too: AWS environment/config can override the endpoint.
+	if r.URL == nil || r.URL.Scheme != "https" {
+		return nil, errS3HTTPSRequired
+	}
+	return t.Transport.RoundTrip(r)
+}
+
 func (a *App) client(ctx context.Context, profileID string) (*s3.Client, error) {
 	a.mu.Lock()
 	var p Profile
@@ -281,7 +299,12 @@ func (a *App) client(ctx context.Context, profileID string) (*s3.Client, error) 
 		}
 		transport.TLSClientConfig = &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
 	}
-	cfg, e := config.LoadDefaultConfig(ctx, config.WithRegion(p.Region), config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(s.AccessKey, s.SecretKey, s.SessionToken)), config.WithHTTPClient(&http.Client{Transport: transport}))
+	httpClient := &http.Client{
+		Transport: httpsOnlyTransport{Transport: transport},
+		// Redirects can forward signed headers and session tokens to another origin.
+		CheckRedirect: func(*http.Request, []*http.Request) error { return errS3Redirect },
+	}
+	cfg, e := config.LoadDefaultConfig(ctx, config.WithRegion(p.Region), config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(s.AccessKey, s.SecretKey, s.SessionToken)), config.WithHTTPClient(httpClient))
 	if e != nil {
 		return nil, e
 	}
