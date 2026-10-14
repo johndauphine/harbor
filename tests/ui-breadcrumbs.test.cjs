@@ -3,6 +3,7 @@ class Element{
  constructor(tag='div'){this.tag=tag;this.children=[];this.attributes={};this.value='';this.classes=new Set();this.classList={add:v=>this.classes.add(v),remove:v=>this.classes.delete(v)};}
  set textContent(v){this.text=v;this.children=[]}get textContent(){return this.children.length?this.children.map(e=>e.textContent).join(''):this.text||''}
  append(e){e.parentElement=this;this.children.push(e)}replaceChildren(...items){this.text='';this.children=[];items.forEach(e=>this.append(e))}
+ showModal(){this.open=true}close(){this.open=false}
  setAttribute(k,v){this.attributes[k]=v}closest(){return false}click(){return this.onclick?.()}
 }
 async function setup(){
@@ -55,4 +56,25 @@ test('column sorting preserves explicit selection and reports loaded scope',asyn
  assert.match(h.get('sort-scope').textContent,/loaded entries only/);assert.equal(h.get('object-count').textContent,'(2+)');
  h.get('sort-size').click();assert.equal(h.get('objects').children[0].children[1].textContent,'a');
  await h.get('profiles').children[1].click();assert.equal(h.get('object-count').textContent,'(0)');assert.equal(h.get('selection-count').textContent,'No file selected');
+});
+
+test('multiple selection survives sorting and refresh; select-all excludes folders',async()=>{
+ const h=await setup();h.setResponder(async()=>({Objects:[{Key:'a',Size:1},{Key:'b',Size:2},{Key:'folder/',Folder:true}],Next:''}));await h.get('refresh').click();
+ await h.get('objects').children[0].click();await h.get('objects').children[1].click();assert.equal(h.get('selection-count').textContent,'2 files selected');assert.equal(h.get('select-all').checked,true);
+ h.get('sort-size').click();await h.context.browse(false,{quiet:true,preserveSelection:true});assert.equal(h.get('selection-count').textContent,'2 files selected');
+ h.get('select-all').click();assert.equal(h.get('selection-count').textContent,'No file selected');h.get('select-all').click();assert.equal(h.get('selection-count').textContent,'2 files selected');assert.equal(h.get('objects').children.filter(r=>r.children[0].children[0]?.checked).length,2);
+});
+test('batch download queues each file once and retains only failed files for retry',async()=>{
+ const h=await setup();h.setResponder(async()=>({Objects:[{Key:'a.txt',Size:1},{Key:'b.txt',Size:2}],Next:''}));await h.get('refresh').click();h.get('select-all').click();
+ const original=h.context.fetch,calls=[];let fail=true;
+ h.context.fetch=async(url,options)=>{const data=JSON.parse(options.body);let value;if(url.endsWith('/save-locations'))value={Path:'/Downloads',Folders:[]};else if(url.endsWith('/transfers'))value=[];else if(url.endsWith('/download')){calls.push(data);if(data.Key==='b.txt'&&fail)return{ok:false,json:async()=>({error:'Disk full'})};value={Path:'/Downloads/'+data.Name}}else return original(url,options);return{ok:true,json:async()=>value}};
+ await h.get('download').click();assert.equal(h.get('save-name-label').hidden,true);await h.get('save-form').onsubmit({preventDefault(){}});assert.equal(calls.length,2);assert.match(h.get('save-error').textContent,/b.txt: Disk full/);assert.equal(h.get('save-dialog').open,true);
+ fail=false;await h.get('save-form').onsubmit({preventDefault(){}});assert.equal(calls.length,3);assert.equal(calls[2].Key,'b.txt');assert.equal(h.get('save-dialog').open,false);
+});
+test('batch delete cancel makes no requests; partial failure remains selected',async()=>{
+ const h=await setup();let files=[{Key:'a',Size:1,ETag:'a-tag'},{Key:'b',Size:2,ETag:'b-tag'}];h.setResponder(async()=>({Objects:files,Next:''}));await h.get('refresh').click();h.get('select-all').click();
+ let confirmed=false,prompt='';h.context.confirm=text=>{prompt=text;return confirmed};const original=h.context.fetch,calls=[];
+ h.context.fetch=async(url,options)=>{if(!url.endsWith('/delete-file'))return original(url,options);const data=JSON.parse(options.body);calls.push(data);if(data.Key==='b')return{ok:false,json:async()=>({error:'Access denied'})};files=files.filter(f=>f.Key!==data.Key);return{ok:true,json:async()=>data.Key}};
+ await h.get('delete').click();assert.equal(calls.length,0);assert.match(prompt,/bucket-a\/a/);assert.match(prompt,/bucket-a\/b/);
+ confirmed=true;await h.get('delete').click();assert.equal(calls.length,2);assert.equal(calls[0].ETag,'a-tag');assert.match(h.get('message').textContent,/Deleted 1 file.*Failed: b: Access denied/);assert.equal(h.get('selection-count').textContent,'1 file selected');assert.match(h.get('details').textContent,/Selected: b/);
 });

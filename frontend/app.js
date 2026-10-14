@@ -1,4 +1,4 @@
-const $=id=>document.getElementById(id);let session=location.hash.slice(1)||sessionStorage.getItem('harbor-session');if(session){sessionStorage.setItem('harbor-session',session);history.replaceState(null,'',location.pathname)}let profile='',bucket='',prefix='',next='',objects=[],selected=null,browseRequest=0,objectFilter='',filterLocation='',sortKey='name',sortAscending=true;async function api(route,data={}){const r=await fetch('/api/'+route,{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+session},body:JSON.stringify(data)});let v=await r.json();if(!r.ok)throw Error(v.error||'Request failed');return v}function message(s){$('message').textContent=s;$('message').className=/failed|error|unable|could not|denied/i.test(s)?'status-error':/completed|saved|deleted|created/i.test(s)?'status-success':''}function action(fn){return async()=>{try{await fn()}catch(e){message(e.message)}}}function button(text,fn){const b=document.createElement('button');b.textContent=text;b.onclick=action(async()=>{if(b.parentElement?.closest("aside")){for(const peer of b.parentElement.children){peer.classList.remove("active");peer.setAttribute("aria-pressed","false")}b.classList.add("active");b.setAttribute("aria-pressed","true")}await fn()});return b}async function profiles(){const list=await api('profiles');$('profiles').replaceChildren(...list.map(p=>button(p.Name,async()=>{profile=p.ID;bucket='';prefix='';renderBreadcrumbs();clearSelection();objects=[];next='';renderObjects();$('buckets').replaceChildren();message('Loading buckets…');const buckets=await api('buckets',{ProfileID:profile});$('buckets').replaceChildren(...buckets.map(b=>button('▱ '+b,async()=>{bucket=b;prefix='';await browse()})));message(buckets.length+' buckets available')})))}async function browse(append=false,options={}){const scope=JSON.stringify([profile,bucket,prefix]);if(filterLocation!==scope){objectFilter='';$('object-search').value='';filterLocation=scope}const request=++browseRequest;const target={ProfileID:profile,Bucket:bucket,Prefix:prefix+objectFilter};const selectedKey=options.preserveSelection?selected?.Key:null;clearSelection();if(!options.quiet)message('Loading…');const page=await api('browse',{...target,Token:append?next:''});if(request!==browseRequest||profile!==target.ProfileID||bucket!==target.Bucket||prefix+objectFilter!==target.Prefix)return false;objects=append?objects.concat(page.Objects):page.Objects;next=page.Next;$('path').value=prefix;$('path').placeholder='Bucket root';renderBreadcrumbs();$('more').hidden=!next;renderObjects(selectedKey);if(!options.quiet)message(bucket+'/'+prefix+' · '+objects.length+' entries');return true}$('add').onclick=()=>$('connection').showModal();$('close').onclick=()=>$('connection').close();$('form').onsubmit=async e=>{e.preventDefault();try{const f=new FormData(e.target);await api('save',{Profile:{Name:f.get('Name'),Endpoint:f.get('Endpoint'),Region:f.get('Region'),PathStyle:f.has('PathStyle'),CAFile:f.get('CAFile')},Secret:{AccessKey:f.get('AccessKey'),SecretKey:f.get('SecretKey'),SessionToken:f.get('SessionToken')}});e.target.reset();$('connection').close();await profiles();message('Connection saved securely')}catch(e){message(e.message)}};$('refresh').onclick=action(()=>browse());$('go').onclick=action(async()=>{prefix=$('path').value;await browse()});$('up').onclick=action(async()=>{prefix=prefix.replace(/[^/]+\/$/,'');await browse()});$('test').onclick=action(async()=>message(await api('test',{ProfileID:profile})));$('more').onclick=action(()=>browse(true));action(profiles)();
+const $=id=>document.getElementById(id);let session=location.hash.slice(1)||sessionStorage.getItem('harbor-session');if(session){sessionStorage.setItem('harbor-session',session);history.replaceState(null,'',location.pathname)}let profile='',bucket='',prefix='',next='',objects=[],selected=null,selectedKeys=new Set(),deleting=false,browseRequest=0,objectFilter='',filterLocation='',sortKey='name',sortAscending=true;async function api(route,data={}){const r=await fetch('/api/'+route,{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+session},body:JSON.stringify(data)});let v=await r.json();if(!r.ok)throw Error(v.error||'Request failed');return v}function message(s){$('message').textContent=s;$('message').className=/failed|error|unable|could not|denied/i.test(s)?'status-error':/completed|saved|deleted|created/i.test(s)?'status-success':''}function action(fn){return async()=>{try{await fn()}catch(e){message(e.message)}}}function button(text,fn){const b=document.createElement('button');b.textContent=text;b.onclick=action(async()=>{if(b.parentElement?.closest("aside")){for(const peer of b.parentElement.children){peer.classList.remove("active");peer.setAttribute("aria-pressed","false")}b.classList.add("active");b.setAttribute("aria-pressed","true")}await fn()});return b}async function profiles(){const list=await api('profiles');$('profiles').replaceChildren(...list.map(p=>button(p.Name,async()=>{profile=p.ID;bucket='';prefix='';renderBreadcrumbs();clearSelection();objects=[];next='';renderObjects();$('buckets').replaceChildren();message('Loading buckets…');const buckets=await api('buckets',{ProfileID:profile});$('buckets').replaceChildren(...buckets.map(b=>button('▱ '+b,async()=>{bucket=b;prefix='';await browse()})));message(buckets.length+' buckets available')})))}async function browse(append=false,options={}){const scope=JSON.stringify([profile,bucket,prefix]);if(filterLocation!==scope){objectFilter='';$('object-search').value='';filterLocation=scope}const request=++browseRequest;const target={ProfileID:profile,Bucket:bucket,Prefix:prefix+objectFilter};const selectedKey=(options.preserveSelection||append)?[...selectedKeys]:[];clearSelection();if(!options.quiet)message('Loading…');const page=await api('browse',{...target,Token:append?next:''});if(request!==browseRequest||profile!==target.ProfileID||bucket!==target.Bucket||prefix+objectFilter!==target.Prefix)return false;objects=append?objects.concat(page.Objects):page.Objects;next=page.Next;$('path').value=prefix;$('path').placeholder='Bucket root';renderBreadcrumbs();$('more').hidden=!next;renderObjects(selectedKey);if(!options.quiet)message(bucket+'/'+prefix+' · '+objects.length+' entries');return true}$('add').onclick=()=>$('connection').showModal();$('close').onclick=()=>$('connection').close();$('form').onsubmit=async e=>{e.preventDefault();try{const f=new FormData(e.target);await api('save',{Profile:{Name:f.get('Name'),Endpoint:f.get('Endpoint'),Region:f.get('Region'),PathStyle:f.has('PathStyle'),CAFile:f.get('CAFile')},Secret:{AccessKey:f.get('AccessKey'),SecretKey:f.get('SecretKey'),SessionToken:f.get('SessionToken')}});e.target.reset();$('connection').close();await profiles();message('Connection saved securely')}catch(e){message(e.message)}};$('refresh').onclick=action(()=>browse());$('go').onclick=action(async()=>{prefix=$('path').value;await browse()});$('up').onclick=action(async()=>{prefix=prefix.replace(/[^/]+\/$/,'');await browse()});$('test').onclick=action(async()=>message(await api('test',{ProfileID:profile})));$('more').onclick=action(()=>browse(true));action(profiles)();
 
 let uploading=false,uploadDirectory=null,uploadSelection=null,uploadTarget=null;
 function localChild(directory,name){const sep=directory.includes('\\')?'\\':'/';return directory.replace(/[\\/]$/,'')+sep+name}
@@ -21,7 +21,7 @@ $('upload-form').onsubmit=async e=>{
  uploading=true;$('upload-confirm').disabled=true;$('upload-cancel').disabled=true;$('upload-error').textContent='Preparing upload…';
  try{await api('upload-local',request);$('upload-dialog').close();message('Upload queued');await transfers()}catch(e){$('upload-error').textContent=e.message}finally{uploading=false;$('upload-confirm').disabled=!uploadSelection;$('upload-cancel').disabled=false}
 };
-$('download').onclick=action(async()=>{if(!selected||selected.Folder)throw Error('Select a file first');await saveDownload({ProfileID:profile,Bucket:bucket,Key:selected.Key})});
+$('download').onclick=action(async()=>{const files=selectedFiles();if(!files.length)throw Error('Select files first');await saveDownload(files.map(o=>({ProfileID:profile,Bucket:bucket,Key:o.Key}))) });
 let savingDownload=false,saveTransfer=null,saveDirectory=null;
 async function loadSaveFolder(path=''){
  const locations=await api('save-locations',{Path:path});saveDirectory=locations;$('save-path').value=locations.Path;
@@ -30,19 +30,31 @@ async function loadSaveFolder(path=''){
  $('save-error').textContent='';
 }
 async function saveDownload(t){
- if(savingDownload)return;saveTransfer=t;$('save-name').value=t.Key.split('/').pop();$('save-error').textContent='';$('save-dialog').showModal();
+ if(savingDownload)return;saveTransfer=Array.isArray(t)?t:[t];$('save-name').value=saveTransfer[0].Key.split('/').pop();$('save-name-label').hidden=saveTransfer.length>1;$('save-name').required=saveTransfer.length===1;$('save-summary').textContent=saveTransfer.length>1?'Save '+saveTransfer.length+' files to the chosen folder, keeping their filenames: '+saveTransfer.map(t=>t.Key).join(', '):'';$('save-error').textContent='';$('save-dialog').showModal();
  try{await loadSaveFolder()}catch(e){$('save-error').textContent=e.message}
 }
 $('save-home').onclick=()=>loadSaveFolder(saveDirectory?.Home||'').catch(e=>$('save-error').textContent=e.message);
 $('save-up').onclick=()=>loadSaveFolder(saveDirectory?.Parent||'').catch(e=>$('save-error').textContent=e.message);
 $('save-go').onclick=()=>loadSaveFolder($('save-path').value).catch(e=>$('save-error').textContent=e.message);
 $('save-cancel').onclick=()=>{if(!savingDownload)$('save-dialog').close()};
+$('save-dialog').oncancel=e=>{if(savingDownload)e.preventDefault()};
 $('save-form').onsubmit=async e=>{
- e.preventDefault();if(savingDownload||!saveTransfer)return;savingDownload=true;$('save-confirm').disabled=true;$('save-cancel').disabled=true;
- try{const request={ProfileID:saveTransfer.ProfileID,Bucket:saveTransfer.Bucket,Key:saveTransfer.Key,Path:$('save-path').value,Name:$('save-name').value,Overwrite:false};let result=await api('download',request);
-  if(result.NeedsOverwrite){if(!confirm('Replace the existing file?\n'+result.Path))return;result=await api('download',{...request,Overwrite:true})}
-  $('save-dialog').close();message('Download queued to '+result.Path);await transfers();
- }catch(e){$('save-error').textContent=e.message;await transfers()}finally{savingDownload=false;$('save-confirm').disabled=false;$('save-cancel').disabled=false}
+ e.preventDefault();if(savingDownload||!saveTransfer?.length)return;
+ const batch=saveTransfer.length>1,directory=$('save-path').value;
+ const names=saveTransfer.map(t=>batch?t.Key.split('/').pop():$('save-name').value);
+ if(new Set(names).size!==names.length){$('save-error').textContent='Some selected files have the same filename. Download those separately to choose different names.';return}
+ savingDownload=true;$('save-confirm').disabled=true;$('save-cancel').disabled=true;
+ const remaining=[],errors=[];let queued=0;
+ try{for(let i=0;i<saveTransfer.length;i++){
+  const t=saveTransfer[i],request={ProfileID:t.ProfileID,Bucket:t.Bucket,Key:t.Key,Path:directory,Name:names[i],Overwrite:false};
+  try{let result=await api('download',request);if(result.NeedsOverwrite){if(!confirm('Replace the existing file?\n'+result.Path)){remaining.push(t);continue}await api('download',{...request,Overwrite:true})}queued++}
+  catch(e){remaining.push(t);errors.push(t.Key+': '+e.message)}
+ }
+ saveTransfer=remaining;
+ if(!remaining.length)$('save-dialog').close();
+ else{$('save-error').textContent=errors.length?errors.join(' · '):'Existing files were skipped. Cancel or choose another destination.';$('save-name-label').hidden=remaining.length>1;$('save-name').required=remaining.length===1;if(remaining.length===1)$('save-name').value=remaining[0].Key.split('/').pop();$('save-summary').textContent=remaining.length+' files remaining: '+remaining.map(t=>t.Key).join(', ')}
+ message(queued+' download'+(queued===1?'':'s')+' queued'+(errors.length?' · Failed to queue: '+errors.join(' · '):''));await transfers();
+ }finally{savingDownload=false;$('save-confirm').disabled=false;$('save-cancel').disabled=false}
 };
 
 
@@ -87,11 +99,30 @@ async function transfers(){
 setInterval(transfers,1000);
 
 
-function clearSelection(){selected=null;$('selection-count').textContent='No file selected';for(const row of $('objects').children){if(row.children[0]?.children[0]?.type==='radio')row.children[0].children[0].checked=false;row.classList.remove('selected');row.setAttribute('aria-selected','false')}$('download').disabled=true;$('delete').disabled=true;$('details').textContent='Select an object to inspect its details.'}clearSelection();
+function selectedFiles(){return objects.filter(o=>!o.Folder&&selectedKeys.has(o.Key))}
+function updateSelection(){
+ const files=selectedFiles();selected=files.length===1?files[0]:null;
+ $('selection-count').textContent=files.length?files.length+' file'+(files.length===1?'':'s')+' selected':'No file selected';
+ $('download').disabled=!files.length;$('delete').disabled=!files.length||deleting;
+ $('details').textContent=selected?'Selected: '+selected.Key+' · '+selected.Size+' bytes · ETag '+selected.ETag:files.length?files.length+' files selected · '+files.reduce((n,o)=>n+o.Size,0).toLocaleString()+' bytes':'Select an object to inspect its details.';
+ for(let i=0;i<$('objects').children.length;i++){const row=$('objects').children[i],chosen=!!objects[i]&&!objects[i].Folder&&selectedKeys.has(objects[i].Key);if(row.children[0]?.children[0]?.type==='checkbox')row.children[0].children[0].checked=chosen;row.classList[chosen?'add':'remove']('selected');row.setAttribute('aria-selected',String(chosen))}
+ const selectable=objects.filter(o=>!o.Folder).length;$('select-all').checked=selectable>0&&files.length===selectable;$('select-all').indeterminate=files.length>0&&files.length<selectable;$('select-all').disabled=!selectable;
+}
+function clearSelection(){selectedKeys.clear();updateSelection()}clearSelection();
+$('select-all').onclick=()=>{const files=objects.filter(o=>!o.Folder);if(files.length&&files.every(o=>selectedKeys.has(o.Key)))selectedKeys.clear();else for(const o of files)selectedKeys.add(o.Key);updateSelection()};
 
 $('new-folder').onclick=action(async()=>{if(!bucket)throw Error('Choose a bucket first');const target={ProfileID:profile,Bucket:bucket,Prefix:prefix};const name=prompt('Create a folder in '+bucket+'/'+prefix+'\nFolder name:');if(name===null)return;const created=await api('create-folder',{...target,Key:name});if(profile===target.ProfileID&&bucket===target.Bucket&&prefix===target.Prefix)await browse();message('Created folder: '+created)});
 
-$('delete').onclick=action(async()=>{if(!selected||selected.Folder)throw Error('Select a file first');const target={ProfileID:profile,Bucket:bucket,Key:selected.Key,ETag:selected.ETag};if(!confirm('Delete this file?\n\n'+target.Bucket+'/'+target.Key+'\n\nThis may permanently remove it. Bucket versioning and retention rules apply.'))return;$('delete').disabled=true;try{await api('delete-file',target);if(profile===target.ProfileID&&bucket===target.Bucket)await browse();message('Deleted: '+target.Key)}finally{$('delete').disabled=!selected||selected.Folder}});
+$('delete').onclick=action(async()=>{
+ if(deleting)return;const files=selectedFiles();if(!files.length)throw Error('Select files first');
+ const target={ProfileID:profile,Bucket:bucket,Prefix:prefix};
+ if(!confirm('Delete '+files.length+' selected file'+(files.length===1?'':'s')+'?\n\n'+files.map(o=>target.Bucket+'/'+o.Key).join('\n')+'\n\nThis may permanently remove them. Bucket versioning and retention rules apply.'))return;
+ deleting=true;updateSelection();const failed=[];let deleted=0;
+ try{for(const o of files){try{await api('delete-file',{...target,Key:o.Key,ETag:o.ETag});deleted++}catch(e){failed.push({key:o.Key,error:e.message})}}
+ if(profile===target.ProfileID&&bucket===target.Bucket&&prefix===target.Prefix){await browse();selectedKeys=new Set(failed.map(f=>f.key));updateSelection()}
+ message('Deleted '+deleted+' file'+(deleted===1?'':'s')+(failed.length?' · Failed: '+failed.map(f=>f.key+': '+f.error).join(' · '):''));
+ }finally{deleting=false;updateSelection()}
+});
 
 function renderBreadcrumbs(){
  const container=$('location');container.replaceChildren();
@@ -106,15 +137,15 @@ function renderBreadcrumbs(){
  });
 }
 
-function renderObjects(selectedKey=null){
+function renderObjects(selectedKey=[...selectedKeys]){
  const field={name:'Key',size:'Size',modified:'Modified',storage:'StorageClass'}[sortKey];
  objects.sort((a,b)=>{const av=a[field]??'',bv=b[field]??'';const compared=sortKey==='size'?Number(av)-Number(bv):String(av).localeCompare(String(bv));return (compared||a.Key.localeCompare(b.Key))*(sortAscending?1:-1)});
  $('object-count').textContent='('+objects.length+(next?'+':'')+')';
  $('sort-scope').textContent=next?'More objects available · sorting loaded entries only':'Sorting all listed entries';
  $('empty-objects').hidden=objects.length>0;$('empty-objects').textContent=objectFilter?'No names match this prefix. Clear the search to see all objects.':'No objects in this folder. Upload a file or create a folder to get started.';
  for(const key of ['name','size','modified','storage'])$('heading-'+key).setAttribute('aria-sort',key===sortKey?(sortAscending?'ascending':'descending'):'none');
-$('objects').replaceChildren(...objects.map(o=>{const row=document.createElement('tr');const cell=document.createElement('td');cell.className='selection-column';if(!o.Folder){const control=document.createElement('input');control.type='radio';control.name='selected-object';control.setAttribute('aria-label','Select '+o.Key);control.onclick=e=>{e.stopPropagation();row.click()};cell.append(control)}row.append(cell);for(const value of [(o.Folder?'▸ ':'')+o.Key.slice(prefix.length),o.Folder?'—':o.Size.toLocaleString()+' B',o.Modified?new Date(o.Modified).toLocaleString():'—',o.StorageClass||'—']){const td=document.createElement('td');td.textContent=value;row.append(td)}row.tabIndex=0;row.setAttribute('aria-selected','false');row.onclick=action(async()=>{if(o.Folder){prefix=o.Key;await browse();return}clearSelection();selected=o;row.children[0].children[0].checked=true;$('selection-count').textContent='1 file selected';row.classList.add('selected');row.setAttribute('aria-selected','true');$('download').disabled=o.Folder;$('delete').disabled=o.Folder;$('details').textContent='Selected: '+o.Key+' · '+o.Size+' bytes · ETag '+o.ETag});row.onkeydown=e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();row.click()}};if(o.Folder)row.title='Open folder';return row}));if(selectedKey){const index=objects.findIndex(o=>!o.Folder&&o.Key===selectedKey);if(index>=0)$('objects').children[index].click()}
+$('objects').replaceChildren(...objects.map(o=>{const row=document.createElement('tr');const cell=document.createElement('td');cell.className='selection-column';if(!o.Folder){const control=document.createElement('input');control.type='checkbox';control.setAttribute('aria-label','Select '+o.Key);control.onclick=e=>{e.stopPropagation();row.click()};cell.append(control)}row.append(cell);for(const value of [(o.Folder?'▸ ':'')+o.Key.slice(prefix.length),o.Folder?'—':o.Size.toLocaleString()+' B',o.Modified?new Date(o.Modified).toLocaleString():'—',o.StorageClass||'—']){const td=document.createElement('td');td.textContent=value;row.append(td)}row.tabIndex=0;row.setAttribute('aria-selected','false');row.onclick=action(async()=>{if(o.Folder){prefix=o.Key;await browse();return}if(selectedKeys.has(o.Key))selectedKeys.delete(o.Key);else selectedKeys.add(o.Key);updateSelection()});row.onkeydown=e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();row.click()}};if(o.Folder)row.title='Open folder';return row}));selectedKeys=new Set((selectedKey||[]).filter(key=>objects.some(o=>!o.Folder&&o.Key===key)));updateSelection();
 }
-for(const key of ['name','size','modified','storage'])$('sort-'+key).onclick=()=>{const selectedKey=selected?.Key;sortAscending=sortKey===key?!sortAscending:true;sortKey=key;renderObjects(selectedKey)};
+for(const key of ['name','size','modified','storage'])$('sort-'+key).onclick=()=>{const selectedKey=[...selectedKeys];sortAscending=sortKey===key?!sortAscending:true;sortKey=key;renderObjects(selectedKey)};
 $('object-search-form').onsubmit=async e=>{e.preventDefault();if(!bucket){message('Choose a bucket first');return}objectFilter=$('object-search').value;try{await browse()}catch(e){message(e.message)}};
 $('clear-search').onclick=action(async()=>{objectFilter='';$('object-search').value='';if(bucket)await browse()});
