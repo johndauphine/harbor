@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const path = require('node:path');
 class Element {
- constructor(){this.children=[];this.classList={add(){},remove(){}};this.value='';}
+ constructor(){this.children=[];this.dataset={};this.classList={add(){},remove(){}};this.value='';}
  append(e){e.parentElement=this;this.children.push(e);}
  replaceChildren(...elements){this.children=[];elements.forEach(e=>this.append(e));}
  remove(){if(this.parentElement)this.parentElement.children=this.parentElement.children.filter(e=>e!==this);}
@@ -17,7 +17,7 @@ class Element {
 test('terminal transfers refresh once, preserve selection, and report failures and retries', async()=>{
  const elements=new Map();const get=id=>{if(!elements.has(id))elements.set(id,new Element());return elements.get(id);};
  let transfers=[],browseCalls=0,downloadRequests=[],uploadRequests=[];
- const context={document:{getElementById:get,createElement:()=>new Element()},location:{hash:'#fixture',pathname:'/'},sessionStorage:{getItem(){},setItem(){}},history:{replaceState(){}},setInterval(){},setTimeout,URL,URLSearchParams,confirm:()=>true,
+ const context={document:{getElementById:get,createElement:()=>new Element()},location:{hash:'#fixture',pathname:'/'},sessionStorage:{getItem(){},setItem(){}},history:{replaceState(){}},setInterval(){},setTimeout,clearTimeout,setTimeout,URL,URLSearchParams,confirm:()=>true,
  fetch:async(url,options)=>{
   let result;
   if(url.endsWith('/profiles'))result=[{ID:'profile',Name:'Fixture'}];
@@ -33,7 +33,7 @@ test('terminal transfers refresh once, preserve selection, and report failures a
  }};
  vm.createContext(context);vm.runInContext(fs.readFileSync(path.join(__dirname,'../frontend/app.js'),'utf8'),context);
  await new Promise(r=>setImmediate(r));
- await get('profiles').children[0].click();await get('buckets').children[0].click();await get('objects').children[0].click();
+ await get('profiles').children[0].children[0].click();await get('buckets').children[0].children[0].click();await get('objects').children[0].click();
  await get('download').click();assert.equal(get('save-dialog').open,true);assert.equal(downloadRequests.length,0,'opening Save As must not queue');assert.equal(get('save-name').value,'fixture.txt');
  get('save-cancel').click();assert.equal(downloadRequests.length,0,'cancelling must not queue');
  await get('download').click();await get('save-form').onsubmit({preventDefault(){}});
@@ -63,6 +63,6 @@ test('terminal transfers refresh once, preserve selection, and report failures a
  await get('location').children[2].click();assert.equal(get('path').value,'first folder/');
  await get('location').children[0].click();assert.equal(get('path').value,'');
  get('path').value='first//last/';await get('go').click();await get('location').children[4].click();assert.equal(get('path').value,'first//','preserve exact S3 prefixes');
- await get('profiles').children[0].click();assert.equal(get('location').children.length,0,'clear stale breadcrumbs when switching connections');
+ await get('profiles').children[0].children[0].click();assert.equal(get('location').children.length,0,'clear stale breadcrumbs when switching connections');
 
 });

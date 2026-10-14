@@ -124,18 +124,19 @@ func webHandler(a *App, host, token string) http.Handler {
 
 		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 		var in struct {
-			Profile   Profile
-			Secret    Secret
-			ProfileID string
-			Bucket    string
-			Prefix    string
-			Token     string
-			ID        string
-			Key       string
-			ETag      string
-			Path      string
-			Name      string
-			Overwrite bool
+			Profile      Profile
+			Secret       Secret
+			ProfileID    string
+			Bucket       string
+			Prefix       string
+			Token        string
+			ID           string
+			Key          string
+			ETag         string
+			Path         string
+			Name         string
+			Confirmation string
+			Overwrite    bool
 		}
 		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 			http.Error(w, "Invalid request", 400)
@@ -148,6 +149,16 @@ func webHandler(a *App, host, token string) http.Handler {
 			value = a.Profiles()
 		case "/api/save":
 			value, err = a.SaveProfile(in.Profile, in.Secret)
+		case "/api/delete-bucket":
+			if in.Bucket == "" || in.Confirmation != in.Bucket {
+				err = fmt.Errorf("Type the exact bucket name to confirm deletion")
+			} else {
+				err = a.DeleteBucket(in.ProfileID, in.Bucket)
+			}
+			value = "Bucket deleted"
+		case "/api/delete-profile":
+			err = a.DeleteProfile(in.ProfileID)
+			value = "Connection deleted"
 		case "/api/test":
 			value, err = a.TestConnection(in.ProfileID)
 		case "/api/buckets":

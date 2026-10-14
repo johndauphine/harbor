@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"encoding/pem"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -286,5 +287,124 @@ func TestTransferListingKeepsCreationOrder(t *testing.T) {
 				t.Fatalf("transfer order changed at position %d", i)
 			}
 		}
+	}
+}
+
+func TestEditProfilePreservesAndReplacesCredentials(t *testing.T) {
+	a := NewApp()
+	a.configFile = filepath.Join(t.TempDir(), "profiles.db")
+	vault := map[string]string{}
+	a.secretSet = func(k, v string) error { vault[k] = v; return nil }
+	a.secretGet = func(k string) (string, error) { return vault[k], nil }
+	p, err := a.SaveProfile(Profile{Name: "Original", Region: "us-east-1"}, Secret{AccessKey: "old-access", SecretKey: "old-secret", SessionToken: "old-token"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := vault[p.ID]
+	p.Name = "Updated"
+	if _, err = a.SaveProfile(p, Secret{}); err != nil {
+		t.Fatal(err)
+	}
+	if vault[p.ID] != old || len(a.Profiles()) != 1 {
+		t.Fatal("metadata edit changed credentials or created duplicate")
+	}
+	if _, err = a.SaveProfile(p, Secret{AccessKey: "updated-access"}); err != nil {
+		t.Fatal(err)
+	}
+	var partial Secret
+	json.Unmarshal([]byte(vault[p.ID]), &partial)
+	if partial.AccessKey != "updated-access" || partial.SecretKey != "old-secret" {
+		t.Fatal("single field edit did not preserve the other key")
+	}
+	if _, err = a.SaveProfile(p, Secret{AccessKey: "new-access", SecretKey: "new-secret"}); err != nil {
+		t.Fatal(err)
+	}
+	var replacement Secret
+	if err = json.Unmarshal([]byte(vault[p.ID]), &replacement); err != nil {
+		t.Fatal(err)
+	}
+	if replacement.AccessKey != "new-access" || replacement.SessionToken != "" {
+		t.Fatal("replacement did not replace old credentials completely")
+	}
+}
+
+func TestDeleteProfileRemovesOnlyLocalSettingsAndCredentials(t *testing.T) {
+	a := NewApp()
+	a.configFile = filepath.Join(t.TempDir(), "profiles.db")
+	vault := map[string]string{}
+	a.secretSet = func(k, v string) error { vault[k] = v; return nil }
+	a.secretGet = func(k string) (string, error) { return vault[k], nil }
+	fail := true
+	a.secretDelete = func(k string) error {
+		if fail {
+			return fmt.Errorf("vault locked")
+		}
+		delete(vault, k)
+		return nil
+	}
+	p, err := a.SaveProfile(Profile{Name: "Disposable", Region: "us-east-1"}, Secret{AccessKey: "test", SecretKey: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = a.DeleteProfile(p.ID); err == nil {
+		t.Fatal("expected vault failure")
+	}
+	if len(a.Profiles()) != 1 || vault[p.ID] == "" {
+		t.Fatal("failed deletion altered profile")
+	}
+	fail = false
+	a.transfers["active"] = &Transfer{ProfileID: p.ID, Status: "running"}
+	if err = a.DeleteProfile(p.ID); err == nil {
+		t.Fatal("deleted active connection")
+	}
+	delete(a.transfers, "active")
+	if err = a.DeleteProfile(p.ID); err != nil {
+		t.Fatal(err)
+	}
+	if len(a.Profiles()) != 0 || vault[p.ID] != "" {
+		t.Fatal("profile or credentials remain")
+	}
+	db, err := a.openStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var count int
+	if err = db.QueryRow("SELECT count(*) FROM profiles").Scan(&count); err != nil || count != 0 {
+		t.Fatalf("metadata remains: %d %v", count, err)
+	}
+}
+
+func TestDeleteBucketNeverDeletesContents(t *testing.T) {
+	var calls int
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if r.Method != "DELETE" || (r.URL.Path != "/empty" && r.URL.Path != "/occupied") || r.URL.RawQuery != "" {
+			t.Errorf("unexpected operation: %s %s", r.Method, r.URL)
+			w.WriteHeader(400)
+			return
+		}
+		if r.URL.Path == "/occupied" {
+			w.WriteHeader(409)
+			w.Write([]byte(`<Error><Code>BucketNotEmpty</Code><Message>Not empty</Message></Error>`))
+			return
+		}
+		w.WriteHeader(204)
+	}))
+	defer server.Close()
+	a := NewApp()
+	a.ctx = context.Background()
+	ca := filepath.Join(t.TempDir(), "ca.pem")
+	os.WriteFile(ca, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: server.Certificate().Raw}), 0600)
+	a.profiles = []Profile{{ID: "test", Name: "Test", Region: "us-east-1", Endpoint: server.URL, PathStyle: true, CAFile: ca}}
+	a.secretGet = func(string) (string, error) { return `{"AccessKey":"fixture","SecretKey":"fixture"}`, nil }
+	if err := a.DeleteBucket("test", "occupied"); err == nil {
+		t.Fatal("nonempty bucket accepted")
+	}
+	if err := a.DeleteBucket("test", "empty"); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 2 {
+		t.Fatalf("unexpected calls: %d", calls)
 	}
 }

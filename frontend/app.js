@@ -1,4 +1,35 @@
-const $=id=>document.getElementById(id);let session=location.hash.slice(1)||sessionStorage.getItem('harbor-session');if(session){sessionStorage.setItem('harbor-session',session);history.replaceState(null,'',location.pathname)}let profile='',bucket='',prefix='',next='',objects=[],selected=null,selectedKeys=new Set(),deleting=false,browseRequest=0,objectFilter='',filterLocation='',sortKey='name',sortAscending=true;async function api(route,data={}){const r=await fetch('/api/'+route,{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+session},body:JSON.stringify(data)});let v=await r.json();if(!r.ok)throw Error(v.error||'Request failed');return v}function message(s){$('message').textContent=s;$('message').className=/failed|error|unable|could not|denied/i.test(s)?'status-error':/completed|saved|deleted|created/i.test(s)?'status-success':''}function action(fn){return async()=>{try{await fn()}catch(e){message(e.message)}}}function button(text,fn){const b=document.createElement('button');b.textContent=text;b.onclick=action(async()=>{if(b.parentElement?.closest("aside")){for(const peer of b.parentElement.children){peer.classList.remove("active");peer.setAttribute("aria-pressed","false")}b.classList.add("active");b.setAttribute("aria-pressed","true")}await fn()});return b}async function profiles(){const list=await api('profiles');$('profiles').replaceChildren(...list.map(p=>button(p.Name,async()=>{profile=p.ID;bucket='';prefix='';renderBreadcrumbs();clearSelection();objects=[];next='';renderObjects();$('buckets').replaceChildren();message('Loading buckets…');const buckets=await api('buckets',{ProfileID:profile});$('buckets').replaceChildren(...buckets.map(b=>button('▱ '+b,async()=>{bucket=b;prefix='';await browse()})));message(buckets.length+' buckets available')})))}async function browse(append=false,options={}){const scope=JSON.stringify([profile,bucket,prefix]);if(filterLocation!==scope){objectFilter='';$('object-search').value='';filterLocation=scope}const request=++browseRequest;const target={ProfileID:profile,Bucket:bucket,Prefix:prefix+objectFilter};const selectedKey=(options.preserveSelection||append)?[...selectedKeys]:[];clearSelection();if(!options.quiet)message('Loading…');const page=await api('browse',{...target,Token:append?next:''});if(request!==browseRequest||profile!==target.ProfileID||bucket!==target.Bucket||prefix+objectFilter!==target.Prefix)return false;objects=append?objects.concat(page.Objects):page.Objects;next=page.Next;$('path').value=prefix;$('path').placeholder='Bucket root';renderBreadcrumbs();$('more').hidden=!next;renderObjects(selectedKey);if(!options.quiet)message(bucket+'/'+prefix+' · '+objects.length+' entries');return true}$('add').onclick=()=>$('connection').showModal();$('close').onclick=()=>$('connection').close();$('form').onsubmit=async e=>{e.preventDefault();try{const f=new FormData(e.target);await api('save',{Profile:{Name:f.get('Name'),Endpoint:f.get('Endpoint'),Region:f.get('Region'),PathStyle:f.has('PathStyle'),CAFile:f.get('CAFile')},Secret:{AccessKey:f.get('AccessKey'),SecretKey:f.get('SecretKey'),SessionToken:f.get('SessionToken')}});e.target.reset();$('connection').close();await profiles();message('Connection saved securely')}catch(e){message(e.message)}};$('refresh').onclick=action(()=>browse());$('go').onclick=action(async()=>{prefix=$('path').value;await browse()});$('up').onclick=action(async()=>{prefix=prefix.replace(/[^/]+\/$/,'');await browse()});$('test').onclick=action(async()=>message(await api('test',{ProfileID:profile})));$('more').onclick=action(()=>browse(true));action(profiles)();
+const $=id=>document.getElementById(id);let session=location.hash.slice(1)||sessionStorage.getItem('harbor-session');if(session){sessionStorage.setItem('harbor-session',session);history.replaceState(null,'',location.pathname)}let profile='',bucket='',prefix='',next='',objects=[],selected=null,selectedKeys=new Set(),deleting=false,browseRequest=0,objectFilter='',filterLocation='',sortKey='name',sortAscending=true;async function api(route,data={}){const r=await fetch('/api/'+route,{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+session},body:JSON.stringify(data)});let v=await r.json();if(!r.ok)throw Error(v.error||'Request failed');return v}function message(s){$('message').textContent=s;$('message').className=/failed|error|unable|could not|denied/i.test(s)?'status-error':/completed|saved|deleted|created/i.test(s)?'status-success':''}function action(fn){return async()=>{try{await fn()}catch(e){message(e.message)}}}function button(text,fn){const b=document.createElement('button');b.textContent=text;b.onclick=action(async()=>{await fn()});return b}async function selectConnection(p){
+ profile=p.ID;bucket='';prefix='';objectFilter='';filterLocation='';$('path').value='';$('object-search').value='';closePathSuggestions();renderBreadcrumbs();clearSelection();objects=[];next='';renderObjects();$('buckets').replaceChildren();message('Loading buckets…');
+ for(const row of $('profiles').children){const b=row.children[0];b.classList[b.dataset.profile===p.ID?'add':'remove']('active');b.setAttribute('aria-pressed',String(b.dataset.profile===p.ID))}
+ const selectedProfile=profile,buckets=await api('buckets',{ProfileID:profile});if(profile!==selectedProfile)return;
+ renderBuckets(buckets,selectedProfile);message(buckets.length+' buckets available');
+}
+async function profiles(){
+ const list=await api('profiles');connectionProfiles=list;
+ $('profiles').replaceChildren(...list.map(p=>{
+ const row=document.createElement('div');row.className='connection-row';
+ const select=document.createElement('button');select.textContent=p.Name;select.dataset.profile=p.ID;select.className='connection-select';select.onclick=action(()=>selectConnection(p));if(profile===p.ID)select.classList.add('active');
+ const menu=document.createElement('details');menu.className='connection-menu';const toggle=document.createElement('summary');toggle.textContent='⋯';toggle.setAttribute('aria-label','Actions for '+p.Name);toggle.title='Actions for '+p.Name;
+ const choices=document.createElement('div');choices.className='connection-choices';
+ choices.append(button('Edit',()=>{menu.open=false;editConnection(p)}));choices.append(button('Delete',async()=>{menu.open=false;await deleteConnection(p)}));menu.append(toggle);menu.append(choices);row.append(select);row.append(menu);return row;
+ }));
+}
+async function deleteConnection(p){
+ if(!confirm('Delete connection “'+p.Name+'”?\nThis removes its saved settings and credentials from this computer. Buckets and files will not be deleted.'))return;
+ await api('delete-profile',{ProfileID:p.ID});
+ if(profile===p.ID){profile='';bucket='';prefix='';objects=[];next='';objectFilter='';filterLocation='';browseRequest++;closePathSuggestions();$('path').value='';$('object-search').value='';$('buckets').replaceChildren();renderBreadcrumbs();clearSelection();renderObjects()}
+ await profiles();message('Deleted connection: '+p.Name);
+}
+async function browse(append=false,options={}){closePathSuggestions();const scope=JSON.stringify([profile,bucket,prefix]);if(filterLocation!==scope){objectFilter='';$('object-search').value='';filterLocation=scope}const request=++browseRequest;const target={ProfileID:profile,Bucket:bucket,Prefix:prefix+objectFilter};const selectedKey=(options.preserveSelection||append)?[...selectedKeys]:[];clearSelection();if(!options.quiet)message('Loading…');const page=await api('browse',{...target,Token:append?next:''});if(request!==browseRequest||profile!==target.ProfileID||bucket!==target.Bucket||prefix+objectFilter!==target.Prefix)return false;objects=append?objects.concat(page.Objects):page.Objects;next=page.Next;$('path').value=prefix;$('path').placeholder='Bucket root';renderBreadcrumbs();$('more').hidden=!next;renderObjects(selectedKey);if(!options.quiet)message(bucket+'/'+prefix+' · '+objects.length+' entries');return true}$('add').onclick=()=>editConnection();$('close').onclick=()=>$('connection').close();$('form').onsubmit=async e=>{
+ e.preventDefault();$('connection-error').textContent='';
+ try{
+ const f=new FormData(e.target);
+ const saved=await api('save',{Profile:{ID:editingConnection,Name:f.get('Name'),Endpoint:f.get('Endpoint'),Region:f.get('Region'),PathStyle:f.has('PathStyle'),CAFile:f.get('CAFile')},Secret:{AccessKey:credentialValue('AccessKey'),SecretKey:credentialValue('SecretKey'),SessionToken:credentialValue('SessionToken')}});
+ e.target.reset();$('connection').close();await profiles();
+ const index=connectionProfiles.findIndex(p=>p.ID===saved.ID);if(index>=0)await $('profiles').children[index].children[0].click();
+ message('Connection saved securely');
+ }catch(e){$('connection-error').textContent=e.message}
+};$('refresh').onclick=action(()=>browse());$('go').onclick=action(openTypedPath);$('up').onclick=action(async()=>{prefix=prefix.replace(/[^/]+\/$/,'');await browse()});$('test').onclick=action(async()=>message(await api('test',{ProfileID:profile})));$('more').onclick=action(()=>browse(true));action(profiles)();
 
 let uploading=false,uploadDirectory=null,uploadSelection=null,uploadTarget=null;
 function localChild(directory,name){const sep=directory.includes('\\')?'\\':'/';return directory.replace(/[\\/]$/,'')+sep+name}
@@ -149,3 +180,101 @@ $('objects').replaceChildren(...objects.map(o=>{const row=document.createElement
 for(const key of ['name','size','modified','storage'])$('sort-'+key).onclick=()=>{const selectedKey=[...selectedKeys];sortAscending=sortKey===key?!sortAscending:true;sortKey=key;renderObjects(selectedKey)};
 $('object-search-form').onsubmit=async e=>{e.preventDefault();if(!bucket){message('Choose a bucket first');return}objectFilter=$('object-search').value;try{await browse()}catch(e){message(e.message)}};
 $('clear-search').onclick=action(async()=>{objectFilter='';$('object-search').value='';if(bucket)await browse()});
+
+// Query storage, rather than only the loaded table, for path completion.
+var pathTimer, pathRequest=0, pathMatches=[], pathActive=-1;
+function closePathSuggestions(){clearTimeout(pathTimer);pathRequest++;pathMatches=[];pathActive=-1;$('path-suggestions').hidden=true;$('path').setAttribute('aria-expanded','false');$('path').setAttribute('aria-activedescendant','')}
+async function suggestPaths(token='',append=false){
+ const input=$('path').value,target={ProfileID:profile,Bucket:bucket,Prefix:input},request=++pathRequest;
+ if(!bucket){closePathSuggestions();return}
+ try{
+  const page=await api('browse',{...target,Token:token});
+  if(request!==pathRequest||input!==$('path').value||target.ProfileID!==profile||target.Bucket!==bucket)return;
+  pathMatches=(append?pathMatches:[]).concat(page.Objects.filter(o=>o.Key.startsWith(input)));pathActive=-1;
+  const rows=pathMatches.map((o,i)=>{const row=button(o.Key,()=>choosePath(o,true));row.id='path-option-'+i;row.setAttribute('role','option');row.setAttribute('aria-selected','false');row.onmousedown=e=>e.preventDefault();return row});
+  $('path-suggestions').replaceChildren(...rows);
+  if(page.Next){const more=button('Load more matches',()=>suggestPaths(page.Next,true));more.onmousedown=e=>e.preventDefault();$('path-suggestions').append(more)}
+  if(!rows.length)$('path-suggestions').textContent='No matching folders or files.';
+  $('path-suggestions').hidden=false;$('path').setAttribute('aria-expanded','true');$('path').setAttribute('aria-activedescendant','');
+ }catch(e){if(request===pathRequest){closePathSuggestions();message('Unable to suggest paths: '+e.message)}}
+}
+async function choosePath(o,navigate=false){
+ closePathSuggestions();$('path').value=o.Key;
+ if(!navigate){if(o.Folder)await suggestPaths();return}
+ if(o.Folder){prefix=o.Key;await browse();return}
+ prefix=o.Key.slice(0,o.Key.lastIndexOf('/')+1);filterLocation=JSON.stringify([profile,bucket,prefix]);objectFilter=o.Key.slice(prefix.length);$('object-search').value=objectFilter;
+ if(await browse()){selectedKeys=new Set([o.Key]);updateSelection();$('path').value=o.Key;message('Selected file: '+o.Key)}
+}
+$('path').oninput=()=>{closePathSuggestions();pathTimer=setTimeout(suggestPaths,180)};
+$('path').onfocus=()=>{closePathSuggestions();pathTimer=setTimeout(suggestPaths,180)};
+$('path').onblur=()=>{closePathSuggestions()};
+$('path').onkeydown=e=>{
+ if(e.key==='Escape'){e.preventDefault();closePathSuggestions();return}
+ if((e.key==='ArrowDown'||e.key==='ArrowUp')&&pathMatches.length){
+  e.preventDefault();pathActive=(pathActive+(e.key==='ArrowDown'?1:-1)+pathMatches.length)%pathMatches.length;
+  for(let i=0;i<$('path-suggestions').children.length;i++){$('path-suggestions').children[i].setAttribute('aria-selected',String(i===pathActive))}
+  $('path').setAttribute('aria-activedescendant','path-option-'+pathActive);return;
+ }
+ if(e.key==='Tab'&&pathMatches.length){
+  e.preventDefault();
+  if(pathActive>=0||pathMatches.length===1){choosePath(pathMatches[pathActive>=0?pathActive:0]);return}
+  let shared=pathMatches[0].Key;
+  for(const match of pathMatches.slice(1)){while(!match.Key.startsWith(shared))shared=shared.slice(0,-1)}
+  if(shared.length>$('path').value.length){$('path').value=shared;suggestPaths()}
+  return;
+ }
+ if(e.key==='Enter'){e.preventDefault();if(pathActive>=0)action(()=>choosePath(pathMatches[pathActive],true))();else $('go').click()}
+};
+
+async function openTypedPath(){
+ const typed=$('path').value,targetProfile=profile,targetBucket=bucket;
+ if(!bucket)throw Error('Choose a bucket first');
+ if(typed&&!typed.endsWith('/')){
+  const page=await api('browse',{ProfileID:profile,Bucket:bucket,Prefix:typed});
+  if(profile!==targetProfile||bucket!==targetBucket||$('path').value!==typed)return;
+  const file=page.Objects.find(o=>!o.Folder&&o.Key===typed);
+  if(file){await choosePath(file,true);return}
+ }
+ prefix=typed;await browse();
+}
+
+var connectionProfiles=[],editingConnection='',credentialDirty={};
+function credentialValue(name){return editingConnection&&!credentialDirty[name]?'':$('connection-'+name).value}
+function credentialFields(){
+ for(const name of ['AccessKey','SecretKey','SessionToken']){
+ const field=$('connection-'+name);field.disabled=false;field.required=!editingConnection&&name!=='SessionToken';field.placeholder=editingConnection?(name==='SessionToken'?'New session token, if needed':'Saved securely — leave blank to keep'):'';
+ }
+ $('credential-help').textContent=editingConnection?'Saved keys are masked. Select a field and type to replace it; untouched or blank key fields keep the saved key. Include a session token if the replacement credentials require one.':'Credentials are stored in your operating system’s secure vault.';
+}
+function editConnection(p=null){
+ editingConnection=p?.ID||'';$('connection-title').textContent=p?'Edit connection':'New connection';$('connection-error').textContent='';
+ for(const name of ['Name','Endpoint','Region','CAFile'])$('connection-'+name).value=p?.[name]||(name==='Region'?'us-east-1':'');
+ $('connection-PathStyle').checked=!!p?.PathStyle;
+ credentialDirty={};
+ for(const name of ['AccessKey','SecretKey','SessionToken']){const field=$('connection-'+name);field.value=p&&name!=='SessionToken'?'••••••••••••':'';field.oninput=()=>{credentialDirty[name]=true};field.onfocus=()=>{if(editingConnection&&!credentialDirty[name]&&name!=='SessionToken')field.select()}};
+ credentialFields();$('connection').showModal();
+}
+
+
+
+function renderBuckets(names,owner){
+ $('buckets').replaceChildren(...names.map(name=>{
+ const row=document.createElement('div');row.className='connection-row';
+ const select=document.createElement('button');select.textContent='▱ '+name;select.className='connection-select';select.onclick=action(async()=>{if(profile!==owner)return;bucket=name;prefix='';for(const peer of $('buckets').children)peer.children[0].classList.remove('active');select.classList.add('active');await browse()});if(bucket===name)select.classList.add('active');
+ const menu=document.createElement('details');menu.className='connection-menu';const toggle=document.createElement('summary');toggle.textContent='⋯';toggle.setAttribute('aria-label','Actions for bucket '+name);
+ const choices=document.createElement('div');choices.className='connection-choices';
+ choices.append(button('Delete',async()=>{menu.open=false;await deleteBucket(owner,name)}));menu.append(toggle);menu.append(choices);row.append(select);row.append(menu);return row;
+ }));
+}
+async function deleteBucket(owner,name){
+ const connection=connectionProfiles.find(p=>p.ID===owner)?.Name||'Selected connection';
+ const confirmation=prompt('Delete empty bucket “'+name+'” from '+connection+'?\nThe bucket must contain no objects, versions, or delete markers. This cannot be undone, and its name may become available to others.\n\nType the exact bucket name to confirm:');
+ if(confirmation===null)return;
+ if(confirmation!==name){message('Bucket not deleted: the confirmation name did not match.');return}
+ await api('delete-bucket',{ProfileID:owner,Bucket:name,Confirmation:confirmation});
+ if(profile===owner){
+ if(bucket===name){bucket='';prefix='';objects=[];next='';objectFilter='';filterLocation='';browseRequest++;closePathSuggestions();$('path').value='';$('object-search').value='';renderBreadcrumbs();clearSelection();renderObjects()}
+ const names=await api('buckets',{ProfileID:owner});if(profile===owner)renderBuckets(names,owner);
+ }
+ message('Deleted bucket: '+name);
+}

@@ -88,10 +88,11 @@ type App struct {
 	configFile    string
 	secretGet     func(string) (string, error)
 	secretSet     func(string, string) error
+	secretDelete  func(string) error
 }
 
 func NewApp() *App {
-	return &App{transfers: map[string]*Transfer{}, secretGet: func(id string) (string, error) { return keyring.Get("HarborS3", id) }, secretSet: func(id, v string) error { return keyring.Set("HarborS3", id, v) }}
+	return &App{secretDelete: func(id string) error { return keyring.Delete("HarborS3", id) }, transfers: map[string]*Transfer{}, secretGet: func(id string) (string, error) { return keyring.Get("HarborS3", id) }, secretSet: func(id, v string) error { return keyring.Set("HarborS3", id, v) }}
 }
 func (a *App) openStore() (*sql.DB, error) {
 	if a.configFile == "" {
@@ -183,9 +184,34 @@ func (a *App) SaveProfile(p Profile, secret Secret) (Profile, error) {
 	if p.ID == "" {
 		p.ID = id()
 	}
-	if secret.AccessKey != "" || secret.SecretKey != "" {
+	if secret.AccessKey != "" || secret.SecretKey != "" || secret.SessionToken != "" {
 		if secret.AccessKey == "" || secret.SecretKey == "" {
-			return Profile{}, errors.New("Both access key and secret key are required")
+			existing := false
+			for _, saved := range a.profiles {
+				if saved.ID == p.ID {
+					existing = true
+					break
+				}
+			}
+			if existing {
+				raw, err := a.secretGet(p.ID)
+				if err != nil {
+					return Profile{}, fmt.Errorf("Credential vault: %w", err)
+				}
+				var saved Secret
+				if err = json.Unmarshal([]byte(raw), &saved); err != nil {
+					return Profile{}, errors.New("Unable to read saved credentials")
+				}
+				if secret.AccessKey == "" {
+					secret.AccessKey = saved.AccessKey
+				}
+				if secret.SecretKey == "" {
+					secret.SecretKey = saved.SecretKey
+				}
+			}
+			if secret.AccessKey == "" || secret.SecretKey == "" {
+				return Profile{}, errors.New("Both access key and secret key are required for a new connection")
+			}
 		}
 		b, _ := json.Marshal(secret)
 		if e := a.secretSet(p.ID, string(b)); e != nil {
@@ -318,7 +344,7 @@ func (a *App) Browse(profileID, bucket, prefix, token string) (Page, error) {
 	}
 	for _, f := range v.Contents {
 		key := aws.ToString(f.Key)
-		if key == prefix {
+		if key == prefix && strings.HasSuffix(key, "/") {
 			continue
 		}
 		modified := ""
@@ -557,4 +583,82 @@ func (a *App) DeleteFile(profile, bucket, key, etag string) (string, error) {
 		return "", fmt.Errorf("Delete failed; refresh the listing before trying again: %w", err)
 	}
 	return key, nil
+}
+
+// DeleteProfile removes only local metadata and vault credentials, never remote objects.
+func (a *App) DeleteProfile(profileID string) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	index := -1
+	for i, p := range a.profiles {
+		if p.ID == profileID {
+			index = i
+			break
+		}
+	}
+	if index < 0 {
+		return errors.New("Connection not found")
+	}
+	for _, t := range a.transfers {
+		if t.ProfileID == profileID && (t.Status == "running" || t.Status == "queued") {
+			return errors.New("Wait for this connection’s transfers to finish or cancel them before deleting it")
+		}
+	}
+	db, err := a.openStore()
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err = tx.Exec("DELETE FROM profiles WHERE id=?", profileID); err != nil {
+		return err
+	}
+	raw, readErr := a.secretGet(profileID)
+	if readErr != nil && !errors.Is(readErr, keyring.ErrNotFound) {
+		return fmt.Errorf("Credential vault: %w", readErr)
+	}
+	if err = a.secretDelete(profileID); err != nil && !errors.Is(err, keyring.ErrNotFound) {
+		return fmt.Errorf("Credential vault: %w", err)
+	}
+	if err = tx.Commit(); err != nil {
+		if readErr == nil {
+			if restoreErr := a.secretSet(profileID, raw); restoreErr != nil {
+				return errors.New("Connection deletion failed and credentials could not be restored; re-enter credentials")
+			}
+		}
+		return err
+	}
+	a.profiles = append(a.profiles[:index], a.profiles[index+1:]...)
+	return nil
+}
+
+func (a *App) DeleteBucket(profileID, bucket string) error {
+	if bucket == "" {
+		return errors.New("Choose a bucket first")
+	}
+	a.mu.Lock()
+	for _, t := range a.transfers {
+		if t.ProfileID == profileID && t.Bucket == bucket && (t.Status == "running" || t.Status == "queued") {
+			a.mu.Unlock()
+			return errors.New("Wait for this bucket’s transfers to finish or cancel them first")
+		}
+	}
+	a.mu.Unlock()
+	ctx, cancel := context.WithTimeout(a.ctx, 30*time.Second)
+	defer cancel()
+	c, err := a.client(ctx, profileID)
+	if err != nil {
+		return err
+	}
+	// DeleteBucket itself rejects any remaining objects, versions or delete markers.
+	// Never empty a bucket automatically.
+	_, err = c.DeleteBucket(ctx, &s3.DeleteBucketInput{Bucket: aws.String(bucket)})
+	if err != nil {
+		return fmt.Errorf("Could not delete bucket. It must be empty, including all versions and delete markers, and you must have permission: %w", err)
+	}
+	return nil
 }
