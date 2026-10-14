@@ -3,7 +3,29 @@ const $=id=>document.getElementById(id);let session=location.hash.slice(1)||sess
 $('upload').onclick=()=>{if(!bucket){message('Choose a bucket first');return}$('file').click()};
 $('file').onchange=action(async()=>{const file=$('file').files[0];if(!file)return;const key=prefix+file.name;if(!confirm('Upload to '+bucket+'/'+key+'? An existing object with this key will be replaced.'))return;message('Staging upload…');const r=await fetch('/api/upload?'+new URLSearchParams({profile,bucket,key}),{method:'POST',headers:{Authorization:'Bearer '+session},body:file});if(!r.ok)throw Error(await r.text());message('Upload queued');$('file').value=''});
 $('download').onclick=action(async()=>{if(!selected||selected.Folder)throw Error('Select a file first');await api('download',{ProfileID:profile,Bucket:bucket,Key:selected.Key});message('Download queued')});
-async function saveDownload(t){const r=await fetch('/api/file',{method:'POST',headers:{Authorization:'Bearer '+session,'Content-Type':'application/json'},body:JSON.stringify({ID:t.ID})});if(!r.ok)throw Error(await r.text());const blob=await r.blob(),url=URL.createObjectURL(blob),link=document.createElement('a');link.href=url;link.download=t.Key.split('/').pop();link.click();setTimeout(()=>URL.revokeObjectURL(url),60000)}
+let savingDownload=false,saveTransfer=null,saveDirectory=null;
+async function loadSaveFolder(path=''){
+ const locations=await api('save-locations',{Path:path});saveDirectory=locations;$('save-path').value=locations.Path;
+ $('save-folders').replaceChildren(...locations.Folders.map(name=>button('▸ '+name,async()=>{try{const separator=locations.Path.includes('\\')?'\\':'/';await loadSaveFolder(locations.Path.replace(/[\\/]$/,'')+separator+name)}catch(e){$('save-error').textContent=e.message}})));
+ if(!locations.Folders.length)$('save-folders').textContent='No subfolders — you can save here.';
+ $('save-error').textContent='';
+}
+async function saveDownload(t){
+ if(savingDownload)return;saveTransfer=t;$('save-name').value=t.Key.split('/').pop();$('save-error').textContent='';$('save-dialog').showModal();
+ try{await loadSaveFolder()}catch(e){$('save-error').textContent=e.message}
+}
+$('save-home').onclick=()=>loadSaveFolder(saveDirectory?.Home||'').catch(e=>$('save-error').textContent=e.message);
+$('save-up').onclick=()=>loadSaveFolder(saveDirectory?.Parent||'').catch(e=>$('save-error').textContent=e.message);
+$('save-go').onclick=()=>loadSaveFolder($('save-path').value).catch(e=>$('save-error').textContent=e.message);
+$('save-cancel').onclick=()=>{if(!savingDownload)$('save-dialog').close()};
+$('save-form').onsubmit=async e=>{
+ e.preventDefault();if(savingDownload||!saveTransfer)return;savingDownload=true;$('save-confirm').disabled=true;$('save-cancel').disabled=true;
+ try{const request={ID:saveTransfer.ID,Path:$('save-path').value,Name:$('save-name').value,Overwrite:false};let result=await api('save-download',request);
+  if(result.NeedsOverwrite){if(!confirm('Replace the existing file?\n'+result.Path))return;result=await api('save-download',{...request,Overwrite:true})}
+  $('save-dialog').close();message('Saved to '+result.Path);
+ }catch(e){$('save-error').textContent=e.message}finally{savingDownload=false;$('save-confirm').disabled=false;$('save-cancel').disabled=false}
+};
+
 
 const transferStates=new Map(),transferRows=new Map();let pollingTransfers=false;
 async function transfers(){
@@ -11,6 +33,7 @@ async function transfers(){
  pollingTransfers=true;
  try{
   const list=await api('transfers');
+  if(transferRows.size===0)$('transfers').replaceChildren();
   const present=new Set(list.map(t=>t.ID));
   for(const [id,entry] of transferRows){if(!present.has(id)){entry.row.remove();transferRows.delete(id)}}
   for(const t of list){

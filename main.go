@@ -121,34 +121,6 @@ func webHandler(a *App, host, token string) http.Handler {
 			json.NewEncoder(w).Encode(id)
 			return
 		}
-		if r.URL.Path == "/api/file" {
-			var in struct{ ID string }
-			r.Body = http.MaxBytesReader(w, r.Body, 1024)
-			if json.NewDecoder(r.Body).Decode(&in) != nil {
-				http.Error(w, "Invalid request", 400)
-				return
-			}
-			a.mu.Lock()
-			t := a.transfers[in.ID]
-			var path string
-			if t != nil && t.Direction == "download" && t.Status == "completed" {
-				path = t.Path
-			}
-			a.mu.Unlock()
-			if path == "" {
-				http.Error(w, "Completed download not found", 404)
-				return
-			}
-			f, err := os.Open(path)
-			if err != nil {
-				http.Error(w, "File unavailable", 404)
-				return
-			}
-			defer f.Close()
-			w.Header().Set("Content-Type", "application/octet-stream")
-			io.Copy(w, f)
-			return
-		}
 
 		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 		var in struct {
@@ -161,6 +133,9 @@ func webHandler(a *App, host, token string) http.Handler {
 			ID        string
 			Key       string
 			ETag      string
+			Path      string
+			Name      string
+			Overwrite bool
 		}
 		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 			http.Error(w, "Invalid request", 400)
@@ -183,6 +158,10 @@ func webHandler(a *App, host, token string) http.Handler {
 			value, err = a.CreateFolder(in.ProfileID, in.Bucket, in.Prefix, in.Key)
 		case "/api/browse":
 			value, err = a.Browse(in.ProfileID, in.Bucket, in.Prefix, in.Token)
+		case "/api/save-locations":
+			value, err = saveLocations(in.Path)
+		case "/api/save-download":
+			value, err = a.SaveDownload(r.Context(), in.ID, in.Path, in.Name, in.Overwrite)
 		case "/api/download":
 			value, err = a.QueueDownload(in.ProfileID, in.Bucket, in.Key)
 		case "/api/transfers":

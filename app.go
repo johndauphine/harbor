@@ -74,6 +74,7 @@ type App struct {
 	profiles      []Profile
 	transfers     map[string]*Transfer
 	transferOrder []string
+	saveMu        sync.Mutex
 	configFile    string
 	secretGet     func(string) (string, error)
 	secretSet     func(string, string) error
