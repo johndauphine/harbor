@@ -29,13 +29,13 @@ From a clean checkout, prepare an explicitly named candidate without creating a 
 python3 scripts/package_release.py --version v0.1.0-rc.1 --output dist
 ```
 
-Choose the version for the candidate being evaluated. The script rejects modified source for candidate and release labels. Developers may use `--version development-local --allow-dirty`; those archives explicitly record the modified-source state. The script builds all three targets with embedded version labels, normalizes archive timestamps/ownership/permissions, includes build metadata and a short startup guide, and writes checksums. Repeated packaging with the same source, compiler, Python/compression runtime and options is repeatable. Signing/timestamping changes the final bytes.
+Choose the version for the candidate being evaluated. The script rejects modified source for candidate and release labels. Developers may use `--version development-local --allow-dirty`; those archives explicitly record the modified-source state. The script builds all four targets with embedded version labels, normalizes archive timestamps/ownership/permissions, includes build metadata and a short startup guide, and writes checksums. Repeated packaging with the same source, compiler, Python/compression runtime and options is repeatable. Signing/timestamping changes the final bytes.
 
 Each archive contains only the executable, `README.txt`, `build-info.json`, Harbor's Apache 2.0 `LICENSE`, and `THIRD_PARTY_NOTICES.txt`. No settings, credentials, caches, session URLs or test data are included. `--version` reports the label, Git revision, toolchain and target. CI uses a development revision label and uploads the archives as workflow artifacts; it does not publish releases.
 
 ## Preserving dependency notices
 
-`THIRD_PARTY_NOTICES.txt` preserves the license, notice, copyright, patent and author files supplied by the actual non-test runtime imports across all three shipped targets. It includes the Go runtime/toolchain license and applicable vendored-package notices, AWS SDK/Smithy notices, and the bundled third-party notices supplied by the SQLite/libc modules. Module-wide upstream documents are kept intact; some describe optional or test-only components without implying those components are linked into Harbor.
+`THIRD_PARTY_NOTICES.txt` preserves the license, notice, copyright, patent and author files supplied by the actual non-test runtime imports across all four shipped targets. It includes the Go runtime/toolchain license and applicable vendored-package notices, AWS SDK/Smithy notices, and the bundled third-party notices supplied by the SQLite/libc modules. Module-wide upstream documents are kept intact; some describe optional or test-only components without implying those components are linked into Harbor.
 
 After changing dependencies or the Go toolchain, run:
 
@@ -48,7 +48,7 @@ Review and commit the generated changes. CI and the packaging command check for 
 
 ## Checksums, extraction and smoke checks
 
-The output consists of a macOS `.tar.gz`, two Windows `.zip` files, and `SHA256SUMS`. The tar archive preserves the macOS executable permission even when downloaded inside a GitHub Actions artifact. Extract the platform archive itself before running Harbor.
+The output consists of a macOS `.tar.gz`, two Windows `.zip` files, a Linux x64 `.tar.gz`, and `SHA256SUMS`. The tar archive preserves the macOS executable permission even when downloaded inside a GitHub Actions artifact. Extract the platform archive itself before running Harbor.
 
 On macOS, verify the archives before extraction:
 
@@ -75,7 +75,7 @@ Use `python scripts/check_archive.py dist\harbor-v0.1.0-rc.1-windows-amd64.zip` 
 | `windows-arm64.zip` | Windows 11 ARM64 | Earlier Edge application checks in the Parallels Windows ARM VM; repeat against the final candidate archive. |
 | `windows-amd64.zip` | Windows 11 x64 | Hosted Windows x64 Go tests and earlier Edge checks under ARM emulation; full native x64 browser/file workflow coverage remains a release-validation task. |
 
-Intel macOS and Linux executables are not included in this candidate distribution. Linux CI validates shared code, not a supported Linux desktop release. No minimum macOS version or Windows version below Windows 11 has been established. ARM emulation checks do not establish native x64 browser coverage. State these limits alongside a candidate rather than implying wider compatibility.
+Intel macOS and Linux ARM64 executables are not included. Linux x64 packaging is supported; an unlocked Secret Service login keyring, user D-Bus session and system CA certificates are required. `xdg-open` is optional when using `--no-browser`. Full interactive Linux desktop/keyring coverage is not yet established. No minimum macOS version or Windows version below Windows 11 has been established. ARM emulation checks do not establish native x64 browser coverage. State these limits alongside a candidate rather than implying wider compatibility.
 
 ## Release-candidate checklist
 

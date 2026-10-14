@@ -15,7 +15,7 @@ class PackagingTests(unittest.TestCase):
             root = Path(directory)
             binary = root / "binary"
             binary.write_bytes(b"disposable executable fixture")
-            for target in ("darwin/arm64", "windows/arm64", "windows/amd64"):
+            for target in ("darwin/arm64", "windows/arm64", "windows/amd64", "linux/amd64"):
                 with self.subTest(target=target):
                     metadata = dict(version="v0.1.0-rc.1", target=target, revision="fixture", modified=False,
                                     toolchain="go1.26.9", publisher_signed=False)
@@ -24,7 +24,7 @@ class PackagingTests(unittest.TestCase):
                     digest = hashlib.sha256(output.read_bytes()).digest()
                     package(binary, output, metadata, 1700000000)
                     self.assertEqual(digest, hashlib.sha256(output.read_bytes()).digest())
-                    executable = "harbor" if target.startswith("darwin") else "harbor.exe"
+                    executable = "harbor.exe" if target.startswith("windows") else "harbor"
                     if executable == "harbor":
                         with tarfile.open(output) as archive:
                             entry = archive.getmember(executable)

@@ -8,7 +8,7 @@ import re
 import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
-TARGETS = ("darwin/arm64", "windows/arm64", "windows/amd64")
+TARGETS = ("darwin/arm64", "windows/arm64", "windows/amd64", "linux/amd64")
 DOCUMENT = re.compile(r"^(LICENSE|LICENCE|COPYING|COPYRIGHT|NOTICE|PATENTS|AUTHORS)(?:[._-].*)?$", re.I)
 
 

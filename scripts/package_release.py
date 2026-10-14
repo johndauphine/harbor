@@ -16,7 +16,7 @@ import zipfile
 from generate_notices import render_notices
 
 ROOT = Path(__file__).resolve().parents[1]
-TARGETS = (("darwin", "arm64"), ("windows", "arm64"), ("windows", "amd64"))
+TARGETS = (("darwin", "arm64"), ("windows", "arm64"), ("windows", "amd64"), ("linux", "amd64"))
 
 
 def run(*args, **kwargs):
@@ -25,7 +25,7 @@ def run(*args, **kwargs):
 
 def archive_name(version, target):
     system, arch = target
-    suffix = "tar.gz" if system == "darwin" else "zip"
+    suffix = "tar.gz" if system != "windows" else "zip"
     return f"harbor-{version}-{system}-{arch}.{suffix}"
 
 
@@ -47,6 +47,8 @@ def package(binary, output, metadata, timestamp):
         "Publisher signing is not established by a checksum.\n"
         "See LICENSE for Harbor and THIRD_PARTY_NOTICES.txt for upstream notices.\n"
     )
+    if system == "linux":
+        instructions += "Linux needs a user D-Bus session and an unlocked Secret Service login keyring (for example GNOME Keyring) to save credentials. Automatic browser opening uses xdg-open; --no-browser skips it. System CA certificates are required for HTTPS.\n"
     members = {
         executable: (binary.read_bytes(), 0o755),
         "README.txt": (instructions.encode(), 0o644),
@@ -57,7 +59,7 @@ def package(binary, output, metadata, timestamp):
         if not document.is_file():
             raise RuntimeError(f"Required distribution document is missing: {name}")
         members[name] = (document.read_bytes(), 0o644)
-    if system == "darwin":
+    if system != "windows":
         with output.open("wb") as raw:
             with gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0) as compressed:
                 with tarfile.open(fileobj=compressed, mode="w", format=tarfile.USTAR_FORMAT) as archive:

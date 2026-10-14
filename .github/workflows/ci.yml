@@ -62,13 +62,12 @@ jobs:
           node --test tests/*.test.cjs
 
       - name: Native archive extraction and isolated startup
-        if: runner.os != 'Linux'
         shell: bash
         run: |
           harbor_target="$(go env GOOS)/$(go env GOARCH)"
           python scripts/package_release.py --version "development-${GITHUB_SHA::12}" --target "$harbor_target" --output dist/native
           harbor_suffix=zip
-          if [[ "$RUNNER_OS" == "macOS" ]]; then harbor_suffix=tar.gz; fi
+          if [[ "$RUNNER_OS" != "Windows" ]]; then harbor_suffix=tar.gz; fi
           python scripts/check_archive.py "dist/native/harbor-development-${GITHUB_SHA::12}-${harbor_target/\//-}.$harbor_suffix"
 
   vulnerabilities:
@@ -81,6 +80,7 @@ jobs:
           - {os: darwin, arch: arm64}
           - {os: windows, arch: arm64}
           - {os: windows, arch: amd64}
+          - {os: linux, arch: amd64}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:

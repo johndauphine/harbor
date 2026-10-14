@@ -1,6 +1,6 @@
 # Harbor S3 Browser
 
-Harbor is a standalone Go executable serving an embedded S3 browser on loopback only. The current target is reliable general-purpose use on macOS Apple Silicon and Windows ARM64/x64.
+Harbor is a standalone Go executable serving an embedded S3 browser on loopback only. The current target is reliable general-purpose use on macOS Apple Silicon and Windows ARM64/x64, and Linux x64.
 
 Current source includes saved connection profiles with OS credential vault storage, S3 bucket and prefix browsing, pagination, and background transfers. Browser uploads now stage files locally and support background progress, cancellation, and retry. Downloads also run in the background with progress, cancellation, and retry. Download opens Save As first and saves automatically to the selected destination. This is a pre-release build. Keep backups and verify behavior with disposable files before using important data. It has not been assessed for regulated federal use.
 
@@ -90,3 +90,9 @@ Regulated federal use remains outside the current release target. This app does 
 ## License
 
 Copyright 2026 John Dauphine. Licensed under the [Apache License, Version 2.0](LICENSE). Third-party dependencies retain their own licenses.
+
+## Linux x64 builds
+
+Linux x64 archives preserve executable permissions. Extract the tar.gz archive and run `./harbor`; use `--no-browser` when opening the printed session URL manually. Automatic opening uses `xdg-open`. Install system CA certificates for verified HTTPS. Saving credentials requires a user D-Bus session and an unlocked Secret Service login collection, such as GNOME Keyring. A bare headless server without that service cannot save credentials; there is no plaintext fallback.
+
+Linux CI validates regressions, browser form behavior, large transfers, vulnerability checks, and native archive startup/shutdown. Full interactive desktop and real Linux keyring testing remain outside this coverage.
