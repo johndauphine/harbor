@@ -69,13 +69,14 @@ type Transfer struct {
 	cancel    context.CancelFunc
 }
 type App struct {
-	ctx        context.Context
-	mu         sync.Mutex
-	profiles   []Profile
-	transfers  map[string]*Transfer
-	configFile string
-	secretGet  func(string) (string, error)
-	secretSet  func(string, string) error
+	ctx           context.Context
+	mu            sync.Mutex
+	profiles      []Profile
+	transfers     map[string]*Transfer
+	transferOrder []string
+	configFile    string
+	secretGet     func(string) (string, error)
+	secretSet     func(string, string) error
 }
 
 func NewApp() *App {
@@ -338,6 +339,7 @@ func (a *App) queue(direction, profile, bucket, key, path string) string {
 	t := &Transfer{ID: id(), Direction: direction, ProfileID: profile, Bucket: bucket, Key: key, Path: path, Status: "queued"}
 	a.mu.Lock()
 	a.transfers[t.ID] = t
+	a.transferOrder = append(a.transferOrder, t.ID)
 	a.mu.Unlock()
 	go a.run(t.ID)
 	return t.ID
@@ -345,9 +347,11 @@ func (a *App) queue(direction, profile, bucket, key, path string) string {
 func (a *App) Transfers() []Transfer {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	out := []Transfer{}
-	for _, t := range a.transfers {
-		out = append(out, *t)
+	out := make([]Transfer, 0, len(a.transferOrder))
+	for _, id := range a.transferOrder {
+		if t := a.transfers[id]; t != nil {
+			out = append(out, *t)
+		}
 	}
 	return out
 }

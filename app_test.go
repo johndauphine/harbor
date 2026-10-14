@@ -213,3 +213,24 @@ func TestCreateFolderMarker(t *testing.T) {
 		t.Fatalf("invalid inputs caused requests: %d", requests.Load())
 	}
 }
+
+func TestTransferListingKeepsCreationOrder(t *testing.T) {
+	a := NewApp()
+	a.ctx = context.Background()
+	defer a.shutdown(context.Background())
+	ids := []string{}
+	for i := 0; i < 20; i++ {
+		ids = append(ids, a.queue("download", "missing-profile", "fixture", "key", ""))
+	}
+	for n := 0; n < 30; n++ {
+		list := a.Transfers()
+		if len(list) != len(ids) {
+			t.Fatalf("got %d transfers", len(list))
+		}
+		for i, v := range list {
+			if v.ID != ids[i] {
+				t.Fatalf("transfer order changed at position %d", i)
+			}
+		}
+	}
+}

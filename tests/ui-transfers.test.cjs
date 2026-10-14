@@ -7,6 +7,7 @@ class Element {
  constructor(){this.children=[];this.classList={add(){},remove(){}};this.value='';}
  append(e){e.parentElement=this;this.children.push(e);}
  replaceChildren(...elements){this.children=[];elements.forEach(e=>this.append(e));}
+ remove(){if(this.parentElement)this.parentElement.children=this.parentElement.children.filter(e=>e!==this);}
  setAttribute(){}
  closest(){return false;}
  click(){return this.onclick?.();}
@@ -30,7 +31,9 @@ test('terminal transfers refresh once, preserve selection, and report failures a
  const transfer={ID:'upload',Direction:'upload',ProfileID:'profile',Bucket:'bucket',Key:'fixture.txt',Done:0,Total:3,Status:'running',Error:''};transfers=[transfer];
  await context.transfers();assert.equal(browseCalls,1);
  transfer.Status='completed';transfer.Done=3;await context.transfers();assert.equal(browseCalls,2);assert.match(get('message').textContent,/Upload completed/);assert.match(get('details').textContent,/Selected: fixture.txt/);
+ const stableRow=get('transfers').children[0],stableControls=stableRow.children[1];
  await context.transfers();assert.equal(browseCalls,2,'completed history must not repeatedly refresh');
+ assert.equal(get('transfers').children[0],stableRow,'polling must reuse the row');assert.equal(stableRow.children[1],stableControls,'polling must retain controls');
  transfers=[{...transfer,ID:'retry',Status:'failed',Error:'Access denied'}];await context.transfers();assert.equal(browseCalls,2);assert.match(get('message').textContent,/Upload failed.*Access denied/);
  transfers[0].Status='running';await context.transfers();transfers[0].Status='completed';await context.transfers();assert.equal(browseCalls,3,'successful retry refreshes');
  transfers=[{...transfer,ID:'download',Direction:'download'}];await context.transfers();assert.equal(browseCalls,4);assert.match(get('message').textContent,/Download ready to save/);

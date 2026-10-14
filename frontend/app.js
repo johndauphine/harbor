@@ -5,20 +5,26 @@ $('file').onchange=action(async()=>{const file=$('file').files[0];if(!file)retur
 $('download').onclick=action(async()=>{if(!selected||selected.Folder)throw Error('Select a file first');await api('download',{ProfileID:profile,Bucket:bucket,Key:selected.Key});message('Download queued')});
 async function saveDownload(t){const r=await fetch('/api/file',{method:'POST',headers:{Authorization:'Bearer '+session,'Content-Type':'application/json'},body:JSON.stringify({ID:t.ID})});if(!r.ok)throw Error(await r.text());const blob=await r.blob(),url=URL.createObjectURL(blob),link=document.createElement('a');link.href=url;link.download=t.Key.split('/').pop();link.click();setTimeout(()=>URL.revokeObjectURL(url),60000)}
 
-const transferStates=new Map();let pollingTransfers=false;
+const transferStates=new Map(),transferRows=new Map();let pollingTransfers=false;
 async function transfers(){
  if(pollingTransfers)return;
  pollingTransfers=true;
  try{
   const list=await api('transfers');
-  $('transfers').replaceChildren(...list.map(t=>{
-   const row=document.createElement('div');
-   row.textContent=t.Direction+' · '+t.Key+' · '+t.Status+' · '+t.Done.toLocaleString()+' / '+t.Total.toLocaleString()+' bytes '+(t.Error||'');
-   if(t.Status==='running'||t.Status==='queued')row.append(button('Cancel',()=>api('cancel',{ID:t.ID})));
-   if(t.Status==='failed'||t.Status==='cancelled')row.append(button('Retry',()=>api('retry',{ID:t.ID})));
-   if(t.Direction==='download'&&t.Status==='completed')row.append(button('Save file',()=>saveDownload(t)));
-   return row;
-  }));
+  const present=new Set(list.map(t=>t.ID));
+  for(const [id,entry] of transferRows){if(!present.has(id)){entry.row.remove();transferRows.delete(id)}}
+  for(const t of list){
+   let entry=transferRows.get(t.ID);
+   if(!entry){const row=document.createElement('div'),label=document.createElement('span'),controls=document.createElement('span');row.append(label);row.append(controls);entry={row,label,controls,status:null};transferRows.set(t.ID,entry);$('transfers').append(row)}
+   entry.label.textContent=t.Direction+' · '+t.Key+' · '+t.Status+' · '+t.Done.toLocaleString()+' / '+t.Total.toLocaleString()+' bytes '+(t.Error||'');
+   if(entry.status!==t.Status){
+    entry.controls.replaceChildren();
+    if(t.Status==='running'||t.Status==='queued')entry.controls.append(button('Cancel',()=>api('cancel',{ID:t.ID})));
+    if(t.Status==='failed'||t.Status==='cancelled')entry.controls.append(button('Retry',()=>api('retry',{ID:t.ID})));
+    if(t.Direction==='download'&&t.Status==='completed')entry.controls.append(button('Save file',()=>saveDownload(t)));
+    entry.status=t.Status;
+   }
+  }
   const changed=list.filter(t=>['completed','failed','cancelled'].includes(t.Status)&&transferStates.get(t.ID)!==t.Status);
   for(const t of list)transferStates.set(t.ID,t.Status);
   let refreshError='';
