@@ -2,7 +2,7 @@
 
 Work in progress: a Go executable serving an embedded browser UI on loopback only.
 
-Current source includes saved connection profiles with OS credential vault storage, S3 bucket and prefix browsing, pagination, and a drafted transfer backend. Browser uploads now stage files locally and support background progress, cancellation, and retry. Downloads also run in the background with progress, cancellation, and retry. Completed downloads have a Save file action. This is an early test build; do not use production or federal data.
+Current source includes saved connection profiles with OS credential vault storage, S3 bucket and prefix browsing, pagination, and a drafted transfer backend. Browser uploads now stage files locally and support background progress, cancellation, and retry. Downloads also run in the background with progress, cancellation, and retry. Download opens Save As first and saves automatically to the selected destination. This is an early test build; do not use production or federal data.
 
 ## Development
 
@@ -47,8 +47,12 @@ The local MinIO release ignores If-Match on DeleteObject, so its preflight catch
 
 ## Transfer refresh
 
-The browser automatically refreshes the relevant current listing when an upload or download completes, preserving the selected file if it remains visible. Terminal status changes are reported once, and failed transfers include their error in the status field. Completed downloads say "ready to save" because browser saving is a separate step. Transfers in other buckets do not change the user's current location. Frontend regression check: `node --test tests/ui-transfers.test.cjs` (Node is only required for this developer test).
+The browser automatically refreshes the relevant current listing when an upload or download completes, preserving the selected file if it remains visible. Terminal status changes are reported once, and failed transfers include their error in the status field. Completed downloads show their saved location in the transfer row. Transfers in other buckets do not change the user's current location. Frontend regression check: `node --test tests/ui-transfers.test.cjs` (Node is only required for this developer test).
 
 ## Save As
 
-Save file opens a folder-and-filename dialog inside Harbor. It starts in Downloads, supports Home/Up navigation and an explicit folder path, and prompts before replacing an existing file. Saving streams directly from the local cache to disk rather than buffering the file in the browser. The picker was exercised end to end in Safari; Mac and Windows builds and save/overwrite regression tests pass. Filesystems that do not support hard links may reject creation of new saved files; existing-file replacement uses rename.
+Download opens a folder-and-filename dialog inside Harbor before queuing the selected file. It starts in Downloads, supports Home/Up navigation and an explicit folder path, and prompts before replacing an existing file. Canceling the dialog does not queue a download. The transfer streams to a temporary file in the destination folder and publishes it only on success; progress, cancellation, retry, and the saved location stay in Transfers. No second Save file action is needed. Filesystems that do not support hard links may reject creation of new saved files; existing-file replacement uses rename.
+
+## Upload picker
+
+Upload uses a matching in-app dialog with local folder navigation, file sizes, and a highlighted file selection. The destination bucket and folder are shown before confirmation. Harbor stages a private copy of the selected regular file (up to 5 GiB) before background upload; cancellation, retry, and cleanup never remove the original local file. Local file listing and upload endpoints use the same loopback, session, Host, and Origin protections as the other APIs.

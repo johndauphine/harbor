@@ -160,10 +160,64 @@ func TestDownloadCancelRetryAndUpload(t *testing.T) {
 	if string(data) != "fixture-payload" {
 		t.Fatalf("incorrect downloaded data %q", data)
 	}
+
+	destinationDir := t.TempDir()
+	result, err := a.QueueDownloadTo("fixture", "bucket", "object", destinationDir, "chosen.txt", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id = result.ID
+	wait("completed")
+	data, _ = os.ReadFile(result.Path)
+	if string(data) != "fixture-payload" {
+		t.Fatal("automatic save content incorrect")
+	}
+	a.mu.Lock()
+	saved := *a.transfers[id]
+	a.mu.Unlock()
+	if saved.SavedPath != result.Path || saved.SavedAt.IsZero() {
+		t.Fatal("automatic save confirmation missing")
+	}
+	count := len(a.Transfers())
+	confirmation, err := a.QueueDownloadTo("fixture", "bucket", "object", destinationDir, "chosen.txt", false)
+	if err != nil || !confirmation.NeedsOverwrite || len(a.Transfers()) != count {
+		t.Fatal("overwrite queued without confirmation")
+	}
+	slow.Store(true)
+	replacement, err := a.QueueDownloadTo("fixture", "bucket", "object", destinationDir, "chosen.txt", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id = replacement.ID
+	wait("running")
+	a.CancelTransfer(id)
+	wait("cancelled")
+	data, _ = os.ReadFile(result.Path)
+	if string(data) != "fixture-payload" {
+		t.Fatal("cancelled replacement damaged existing file")
+	}
+	slow.Store(false)
+	if err := a.RetryTransfer(id); err != nil {
+		t.Fatal(err)
+	}
+	wait("completed")
+	a.shutdown(context.Background())
+	data, _ = os.ReadFile(result.Path)
+	if string(data) != "fixture-payload" {
+		t.Fatal("shutdown removed saved download")
+	}
 	upload := filepath.Join(t.TempDir(), "upload")
 	os.WriteFile(upload, []byte("fixture-payload"), 0600)
-	id = a.queue("upload", "fixture", "bucket", "object", upload)
+	id, err = a.QueueLocalUpload(context.Background(), "fixture", "bucket", "object", upload)
+	if err != nil {
+		t.Fatal(err)
+	}
 	wait("completed")
+	a.shutdown(context.Background())
+	data, _ = os.ReadFile(upload)
+	if string(data) != "fixture-payload" {
+		t.Fatal("upload removed original local file")
+	}
 	if !uploaded.Load() {
 		t.Fatal("upload not received")
 	}

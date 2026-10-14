@@ -102,3 +102,20 @@ func TestSaveLocationListsOnlyFolders(t *testing.T) {
 		t.Fatalf("unexpected locations: %+v", v)
 	}
 }
+
+func TestUploadLocationsListsRegularFiles(t *testing.T) {
+	dir := t.TempDir()
+	os.Mkdir(filepath.Join(dir, "Folder"), 0700)
+	os.WriteFile(filepath.Join(dir, "file.txt"), []byte("test"), 0600)
+	os.Symlink(filepath.Join(dir, "file.txt"), filepath.Join(dir, "link"))
+	result, err := uploadLocations(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Files) != 1 || result.Files[0].Name != "file.txt" || result.Files[0].Size != 4 {
+		t.Fatalf("incorrect files: %+v", result.Files)
+	}
+	if len(result.Folders) != 1 {
+		t.Fatal("folder missing")
+	}
+}

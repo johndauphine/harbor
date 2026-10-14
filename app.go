@@ -55,22 +55,28 @@ type Page struct {
 	Objects []Object
 	Next    string
 }
-type Transfer struct {
-	ID        string
-	Direction string
-	Key       string
+type downloadTarget struct {
 	Path      string
-	ProfileID string
-	Bucket    string
-	Done      int64
-	Total     int64
-	Status    string
-	Error     string
-	CreatedAt time.Time
-	SavedAt   time.Time
-	SavedPath string
-	SaveError string
-	cancel    context.CancelFunc
+	Overwrite bool
+}
+
+type Transfer struct {
+	destination *downloadTarget
+	ID          string
+	Direction   string
+	Key         string
+	Path        string
+	ProfileID   string
+	Bucket      string
+	Done        int64
+	Total       int64
+	Status      string
+	Error       string
+	CreatedAt   time.Time
+	SavedAt     time.Time
+	SavedPath   string
+	SaveError   string
+	cancel      context.CancelFunc
 }
 type App struct {
 	ctx           context.Context
@@ -323,7 +329,7 @@ func (a *App) Browse(profileID, bucket, prefix, token string) (Page, error) {
 	}
 	return page, nil
 }
-func (a *App) QueueDownload(profile, bucket, key string) (string, error) {
+func (a *App) QueueDownload(profile, bucket, key string, target ...downloadTarget) (string, error) {
 	if bucket == "" || key == "" {
 		return "", errors.New("Bucket and key required")
 	}
@@ -338,10 +344,13 @@ func (a *App) QueueDownload(profile, bucket, key string) (string, error) {
 	if e = os.MkdirAll(dir, 0700); e != nil {
 		return "", e
 	}
-	return a.queue("download", profile, bucket, key, filepath.Join(dir, "download-"+id())), nil
+	return a.queue("download", profile, bucket, key, filepath.Join(dir, "download-"+id()), target...), nil
 }
-func (a *App) queue(direction, profile, bucket, key, path string) string {
+func (a *App) queue(direction, profile, bucket, key, path string, target ...downloadTarget) string {
 	t := &Transfer{ID: id(), Direction: direction, ProfileID: profile, Bucket: bucket, Key: key, Path: path, Status: "queued", CreatedAt: time.Now()}
+	if len(target) > 0 {
+		t.destination = &target[0]
+	}
 	a.mu.Lock()
 	a.transfers[t.ID] = t
 	a.transferOrder = append(a.transferOrder, t.ID)
@@ -423,6 +432,11 @@ func (a *App) run(id string) {
 	} else {
 		t.Status = "completed"
 		t.Done = t.Total
+		if t.destination != nil {
+			t.SavedPath = t.destination.Path
+			t.SavedAt = time.Now()
+			t.SaveError = ""
+		}
 		if t.Direction == "upload" {
 			_ = os.Remove(t.Path)
 		}
@@ -455,13 +469,20 @@ func (a *App) execute(ctx context.Context, t Transfer) error {
 	}
 	defer v.Body.Close()
 	total(aws.ToInt64(v.ContentLength))
-	f, e := os.CreateTemp(filepath.Dir(t.Path), ".harbor-download-*")
+	directory := filepath.Dir(t.Path)
+	if t.destination != nil {
+		directory = filepath.Dir(t.destination.Path)
+	}
+	f, e := os.CreateTemp(directory, ".harbor-download-*")
 	if e != nil {
 		return e
 	}
 	tmp := f.Name()
 	defer os.Remove(tmp)
 	_, e = io.Copy(f, &progressReader{Reader: v.Body, update: update})
+	if e == nil {
+		e = f.Sync()
+	}
 	closeErr := f.Close()
 	if e != nil {
 		return e
@@ -471,6 +492,12 @@ func (a *App) execute(ctx context.Context, t Transfer) error {
 	}
 	if e = ctx.Err(); e != nil {
 		return e
+	}
+	if t.destination != nil {
+		if t.destination.Overwrite {
+			return os.Rename(tmp, t.destination.Path)
+		}
+		return os.Link(tmp, t.destination.Path)
 	}
 	return os.Rename(tmp, t.Path)
 }

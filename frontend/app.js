@@ -1,8 +1,27 @@
 const $=id=>document.getElementById(id);let session=location.hash.slice(1)||sessionStorage.getItem('harbor-session');if(session){sessionStorage.setItem('harbor-session',session);history.replaceState(null,'',location.pathname)}let profile='',bucket='',prefix='',next='',objects=[],selected=null,browseRequest=0;async function api(route,data={}){const r=await fetch('/api/'+route,{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+session},body:JSON.stringify(data)});let v=await r.json();if(!r.ok)throw Error(v.error||'Request failed');return v}function message(s){$('message').textContent=s}function action(fn){return async()=>{try{await fn()}catch(e){message(e.message)}}}function button(text,fn){const b=document.createElement('button');b.textContent=text;b.onclick=action(async()=>{if(b.parentElement?.closest("aside")){for(const peer of b.parentElement.children){peer.classList.remove("active");peer.setAttribute("aria-pressed","false")}b.classList.add("active");b.setAttribute("aria-pressed","true")}await fn()});return b}async function profiles(){const list=await api('profiles');$('profiles').replaceChildren(...list.map(p=>button(p.Name,async()=>{profile=p.ID;bucket='';prefix='';clearSelection();$('objects').replaceChildren();$('buckets').replaceChildren();message('Loading buckets…');const buckets=await api('buckets',{ProfileID:profile});$('buckets').replaceChildren(...buckets.map(b=>button('▱ '+b,async()=>{bucket=b;prefix='';await browse()})));message(buckets.length+' buckets available')})))}async function browse(append=false,options={}){const request=++browseRequest;const target={ProfileID:profile,Bucket:bucket,Prefix:prefix};const selectedKey=options.preserveSelection?selected?.Key:null;clearSelection();if(!options.quiet)message('Loading…');const page=await api('browse',{...target,Token:append?next:''});if(request!==browseRequest||profile!==target.ProfileID||bucket!==target.Bucket||prefix!==target.Prefix)return false;objects=append?objects.concat(page.Objects):page.Objects;next=page.Next;$('path').value=prefix;$('path').placeholder='Bucket root';$('location').textContent=bucket+'/'+prefix;$('more').hidden=!next;$('objects').replaceChildren(...objects.map(o=>{const row=document.createElement('tr');for(const value of [(o.Folder?'▸ ':'')+o.Key.slice(prefix.length),o.Folder?'—':o.Size.toLocaleString()+' B',o.Modified?new Date(o.Modified).toLocaleString():'—',o.StorageClass||'—']){const td=document.createElement('td');td.textContent=value;row.append(td)}row.tabIndex=0;row.setAttribute('aria-selected','false');row.onclick=action(async()=>{if(o.Folder){prefix=o.Key;await browse();return}clearSelection();selected=o;row.classList.add('selected');row.setAttribute('aria-selected','true');$('download').disabled=o.Folder;$('delete').disabled=o.Folder;$('details').textContent='Selected: '+o.Key+' · '+o.Size+' bytes · ETag '+o.ETag});row.onkeydown=e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();row.click()}};if(o.Folder)row.title='Open folder';return row}));if(selectedKey){const index=objects.findIndex(o=>!o.Folder&&o.Key===selectedKey);if(index>=0)$('objects').children[index].click()}if(!options.quiet)message(bucket+'/'+prefix+' · '+objects.length+' entries');return true}$('add').onclick=()=>$('connection').showModal();$('close').onclick=()=>$('connection').close();$('form').onsubmit=async e=>{e.preventDefault();try{const f=new FormData(e.target);await api('save',{Profile:{Name:f.get('Name'),Endpoint:f.get('Endpoint'),Region:f.get('Region'),PathStyle:f.has('PathStyle'),CAFile:f.get('CAFile')},Secret:{AccessKey:f.get('AccessKey'),SecretKey:f.get('SecretKey'),SessionToken:f.get('SessionToken')}});e.target.reset();$('connection').close();await profiles();message('Connection saved securely')}catch(e){message(e.message)}};$('refresh').onclick=action(()=>browse());$('go').onclick=action(async()=>{prefix=$('path').value;await browse()});$('up').onclick=action(async()=>{prefix=prefix.replace(/[^/]+\/$/,'');await browse()});$('test').onclick=action(async()=>message(await api('test',{ProfileID:profile})));$('more').onclick=action(()=>browse(true));action(profiles)();
 
-$('upload').onclick=()=>{if(!bucket){message('Choose a bucket first');return}$('file').click()};
-$('file').onchange=action(async()=>{const file=$('file').files[0];if(!file)return;const key=prefix+file.name;if(!confirm('Upload to '+bucket+'/'+key+'? An existing object with this key will be replaced.'))return;message('Staging upload…');const r=await fetch('/api/upload?'+new URLSearchParams({profile,bucket,key}),{method:'POST',headers:{Authorization:'Bearer '+session},body:file});if(!r.ok)throw Error(await r.text());message('Upload queued');$('file').value=''});
-$('download').onclick=action(async()=>{if(!selected||selected.Folder)throw Error('Select a file first');await api('download',{ProfileID:profile,Bucket:bucket,Key:selected.Key});message('Download queued')});
+let uploading=false,uploadDirectory=null,uploadSelection=null,uploadTarget=null;
+function localChild(directory,name){const sep=directory.includes('\\')?'\\':'/';return directory.replace(/[\\/]$/,'')+sep+name}
+async function loadUploadFolder(path=''){
+ const locations=await api('upload-locations',{Path:path});uploadDirectory=locations;uploadSelection=null;$('upload-confirm').disabled=true;$('upload-selection').textContent='Choose a file.';$('upload-path').value=locations.Path;
+ const folders=locations.Folders.map(name=>button('▸ '+name,()=>loadUploadFolder(localChild(locations.Path,name))));
+ const files=(locations.Files||[]).map(file=>{const row=button(file.Name+' · '+file.Size.toLocaleString()+' bytes',()=>{uploadSelection={Path:localChild(locations.Path,file.Name),Name:file.Name};for(const peer of $('upload-files').children)peer.classList.remove('active');row.classList.add('active');$('upload-selection').textContent='Selected: '+file.Name;$('upload-confirm').disabled=false});return row});
+ $('upload-files').replaceChildren(...folders,...files);if(!folders.length&&!files.length)$('upload-files').textContent='This folder is empty.';$('upload-error').textContent='';
+}
+$('upload').onclick=action(async()=>{if(!bucket)throw Error('Choose a bucket first');uploadTarget={ProfileID:profile,Bucket:bucket,Prefix:prefix};$('upload-destination').textContent='Upload to '+bucket+'/'+prefix;$('upload-dialog').showModal();try{await loadUploadFolder()}catch(e){$('upload-error').textContent=e.message}});
+$('upload-home').onclick=()=>loadUploadFolder(uploadDirectory?.Home||'').catch(e=>$('upload-error').textContent=e.message);
+$('upload-up').onclick=()=>loadUploadFolder(uploadDirectory?.Parent||'').catch(e=>$('upload-error').textContent=e.message);
+$('upload-go').onclick=()=>loadUploadFolder($('upload-path').value).catch(e=>$('upload-error').textContent=e.message);
+$('upload-cancel').onclick=()=>{if(!uploading)$('upload-dialog').close()};
+$('upload-dialog').oncancel=e=>{if(uploading)e.preventDefault()};
+$('upload-form').onsubmit=async e=>{
+ e.preventDefault();if(uploading||!uploadSelection||!uploadTarget)return;
+ const request={ProfileID:uploadTarget.ProfileID,Bucket:uploadTarget.Bucket,Key:uploadTarget.Prefix+uploadSelection.Name,Path:uploadSelection.Path};
+ if(!confirm('Upload to '+request.Bucket+'/'+request.Key+'? An existing object with this key will be replaced.'))return;
+ uploading=true;$('upload-confirm').disabled=true;$('upload-cancel').disabled=true;$('upload-error').textContent='Preparing upload…';
+ try{await api('upload-local',request);$('upload-dialog').close();message('Upload queued');await transfers()}catch(e){$('upload-error').textContent=e.message}finally{uploading=false;$('upload-confirm').disabled=!uploadSelection;$('upload-cancel').disabled=false}
+};
+$('download').onclick=action(async()=>{if(!selected||selected.Folder)throw Error('Select a file first');await saveDownload({ProfileID:profile,Bucket:bucket,Key:selected.Key})});
 let savingDownload=false,saveTransfer=null,saveDirectory=null;
 async function loadSaveFolder(path=''){
  const locations=await api('save-locations',{Path:path});saveDirectory=locations;$('save-path').value=locations.Path;
@@ -20,9 +39,9 @@ $('save-go').onclick=()=>loadSaveFolder($('save-path').value).catch(e=>$('save-e
 $('save-cancel').onclick=()=>{if(!savingDownload)$('save-dialog').close()};
 $('save-form').onsubmit=async e=>{
  e.preventDefault();if(savingDownload||!saveTransfer)return;savingDownload=true;$('save-confirm').disabled=true;$('save-cancel').disabled=true;
- try{const request={ID:saveTransfer.ID,Path:$('save-path').value,Name:$('save-name').value,Overwrite:false};let result=await api('save-download',request);
-  if(result.NeedsOverwrite){if(!confirm('Replace the existing file?\n'+result.Path))return;result=await api('save-download',{...request,Overwrite:true})}
-  $('save-dialog').close();message('Saved to '+result.Path);await transfers();
+ try{const request={ProfileID:saveTransfer.ProfileID,Bucket:saveTransfer.Bucket,Key:saveTransfer.Key,Path:$('save-path').value,Name:$('save-name').value,Overwrite:false};let result=await api('download',request);
+  if(result.NeedsOverwrite){if(!confirm('Replace the existing file?\n'+result.Path))return;result=await api('download',{...request,Overwrite:true})}
+  $('save-dialog').close();message('Download queued to '+result.Path);await transfers();
  }catch(e){$('save-error').textContent=e.message;await transfers()}finally{savingDownload=false;$('save-confirm').disabled=false;$('save-cancel').disabled=false}
 };
 
@@ -49,7 +68,6 @@ async function transfers(){
     entry.controls.replaceChildren();
     if(t.Status==='running'||t.Status==='queued')entry.controls.append(button('Cancel',()=>api('cancel',{ID:t.ID})));
     if(t.Status==='failed'||t.Status==='cancelled')entry.controls.append(button('Retry',()=>api('retry',{ID:t.ID})));
-    if(t.Direction==='download'&&t.Status==='completed')entry.controls.append(button('Save file',()=>saveDownload(t)));
     entry.status=t.Status;
    }
   }
@@ -60,7 +78,7 @@ async function transfers(){
    try{await browse(false,{quiet:true,preserveSelection:true})}catch(e){refreshError='Listing refresh failed: '+e.message}
   }
   if(changed.length){
-   const summaries=changed.map(t=>{const verb=t.Direction==='upload'?'Upload':'Download';return verb+' '+(t.Status==='completed'?(t.Direction==='download'?'ready to save':'completed'):t.Status)+': '+t.Key+(t.Status==='failed'?' — '+(t.Error||'Unknown error'):'')});
+   const summaries=changed.map(t=>{const verb=t.Direction==='upload'?'Upload':'Download';return verb+' '+(t.Status==='completed'?(t.Direction==='download'?'saved':'completed'):t.Status)+': '+t.Key+(t.Status==='failed'?' — '+(t.Error||'Unknown error'):'')});
    if(refreshError)summaries.push(refreshError);
    message(summaries.join(' · '));
   }

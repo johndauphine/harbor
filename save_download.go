@@ -12,6 +12,7 @@ import (
 )
 
 type SaveResult struct {
+	ID             string
 	Path           string
 	NeedsOverwrite bool
 }
@@ -20,6 +21,7 @@ type SaveLocations struct {
 	Parent  string
 	Home    string
 	Folders []string
+	Files   []LocalFile `json:",omitempty"`
 }
 
 func saveLocations(directory string) (SaveLocations, error) {
@@ -138,4 +140,103 @@ func copyDownload(ctx context.Context, source io.Reader, destination string, ove
 	}
 	// Link publishes the complete file atomically without replacing a file created concurrently.
 	return os.Link(tmp, destination)
+}
+
+// QueueDownloadTo confirms the destination before starting any transfer.
+func (a *App) QueueDownloadTo(profile, bucket, key, directory, name string, overwrite bool) (SaveResult, error) {
+	if name == "" || name == "." || name == ".." || strings.ContainsAny(name, "/\\\x00") || !filepath.IsAbs(directory) {
+		return SaveResult{}, errors.New("Choose a folder and enter a filename without slashes")
+	}
+	st, err := os.Stat(directory)
+	if err != nil {
+		return SaveResult{}, err
+	}
+	if !st.IsDir() {
+		return SaveResult{}, errors.New("Choose a folder")
+	}
+	destination := filepath.Join(directory, name)
+	if st, err := os.Lstat(destination); err == nil {
+		if st.IsDir() {
+			return SaveResult{}, errors.New("A folder already has this name")
+		}
+		if !overwrite {
+			return SaveResult{Path: destination, NeedsOverwrite: true}, nil
+		}
+	} else if !os.IsNotExist(err) {
+		return SaveResult{}, err
+	}
+	id, err := a.QueueDownload(profile, bucket, key, downloadTarget{Path: destination, Overwrite: overwrite})
+	return SaveResult{ID: id, Path: destination}, err
+}
+
+type LocalFile struct {
+	Name string
+	Size int64
+}
+
+func uploadLocations(directory string) (SaveLocations, error) {
+	result, err := saveLocations(directory)
+	if err != nil {
+		return result, err
+	}
+	entries, err := os.ReadDir(result.Path)
+	if err != nil {
+		return result, err
+	}
+	result.Files = []LocalFile{}
+	for _, entry := range entries {
+		if entry.Type().IsRegular() {
+			if info, err := entry.Info(); err == nil && info.Mode().IsRegular() {
+				result.Files = append(result.Files, LocalFile{Name: entry.Name(), Size: info.Size()})
+			}
+		}
+	}
+	return result, nil
+}
+func (a *App) QueueLocalUpload(ctx context.Context, profile, bucket, key, path string) (string, error) {
+	if bucket == "" || key == "" || strings.HasSuffix(key, "/") {
+		return "", errors.New("Choose a destination file")
+	}
+	if !filepath.IsAbs(path) {
+		return "", errors.New("Choose a local file")
+	}
+	if _, err := a.client(ctx, profile); err != nil {
+		return "", err
+	}
+	st, err := os.Lstat(path)
+	if err != nil {
+		return "", err
+	}
+	if !st.Mode().IsRegular() {
+		return "", errors.New("Select a regular file")
+	}
+	const limit = 5 << 30
+	if st.Size() > limit {
+		return "", errors.New("Uploads are limited to 5 GiB")
+	}
+	source, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer source.Close()
+	dir, err := os.UserCacheDir()
+	if err != nil {
+		return "", err
+	}
+	dir = filepath.Join(dir, "HarborS3")
+	if err = os.MkdirAll(dir, 0700); err != nil {
+		return "", err
+	}
+	staged, err := os.CreateTemp(dir, "upload-*")
+	if err != nil {
+		return "", err
+	}
+	stagedPath := staged.Name()
+	n, copyErr := io.Copy(staged, io.LimitReader(contextReader{ctx, source}, limit+1))
+	closeErr := staged.Close()
+	if copyErr != nil || closeErr != nil || n > limit {
+		os.Remove(stagedPath)
+		return "", errors.New("Could not stage upload; check file access and the 5 GiB limit")
+	}
+	return a.queue("upload", profile, bucket, key, stagedPath), nil
 }

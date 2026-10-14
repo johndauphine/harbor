@@ -158,12 +158,16 @@ func webHandler(a *App, host, token string) http.Handler {
 			value, err = a.CreateFolder(in.ProfileID, in.Bucket, in.Prefix, in.Key)
 		case "/api/browse":
 			value, err = a.Browse(in.ProfileID, in.Bucket, in.Prefix, in.Token)
+		case "/api/upload-locations":
+			value, err = uploadLocations(in.Path)
+		case "/api/upload-local":
+			value, err = a.QueueLocalUpload(r.Context(), in.ProfileID, in.Bucket, in.Key, in.Path)
 		case "/api/save-locations":
 			value, err = saveLocations(in.Path)
 		case "/api/save-download":
 			value, err = a.SaveDownload(r.Context(), in.ID, in.Path, in.Name, in.Overwrite)
 		case "/api/download":
-			value, err = a.QueueDownload(in.ProfileID, in.Bucket, in.Key)
+			value, err = a.QueueDownloadTo(in.ProfileID, in.Bucket, in.Key, in.Path, in.Name, in.Overwrite)
 		case "/api/transfers":
 			value = a.Transfers()
 		case "/api/cancel":
