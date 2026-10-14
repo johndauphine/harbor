@@ -1,4 +1,4 @@
-# Harbor S3 Browser
+# S3 Browser
 
 Work in progress: a Go executable serving an embedded browser UI on loopback only.
 
@@ -28,3 +28,7 @@ The server binds only to 127.0.0.1 and requires a random session token for API r
 Assumptions: patched OS and browser, disk encryption, protected user account, and approved storage endpoints. FedRAMP High compliance, validated cryptography configuration, real storage integrations, and platform packaging are not verified.
 
 Independent implementation inspired by familiar S3 file-manager layouts. No code or assets copied from CS Browser, brows3, BucketDock, or Cyberduck.
+
+## Configuration location
+
+Default: `.s3-browser/profiles.db` under the current user home directory on both macOS and Windows. Override with `--db /chosen/path/profiles.db`. No YAML bootstrap file is required. Credentials remain in the OS vault; the internal vault service name is retained for compatibility.

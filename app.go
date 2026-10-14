@@ -106,11 +106,13 @@ func (a *App) openStore() (*sql.DB, error) {
 }
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
-	dir, err := os.UserConfigDir()
+	dir, err := os.UserHomeDir()
 	if err != nil {
 		return
 	}
-	a.configFile = filepath.Join(dir, "HarborS3", "profiles.db")
+	if a.configFile == "" {
+		a.configFile = filepath.Join(dir, ".s3-browser", "profiles.db")
+	}
 	db, err := a.openStore()
 	if err != nil {
 		return
@@ -155,7 +157,7 @@ func validate(p Profile) error {
 	if p.Endpoint != "" {
 		u, e := url.Parse(p.Endpoint)
 		if e != nil || u.Host == "" || u.Scheme != "https" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
-			return errors.New("Endpoint must be an HTTP(S) URL without credentials, query or fragment")
+			return errors.New("Endpoint must be an HTTPS URL without credentials, query or fragment")
 		}
 	}
 	return nil
