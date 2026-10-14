@@ -32,3 +32,9 @@ Independent implementation inspired by familiar S3 file-manager layouts. No code
 ## Configuration location
 
 Default: `.harbor/profiles.db` under the current user home directory on both macOS and Windows. Override with `--db /chosen/path/profiles.db`. No YAML bootstrap file is required. Credentials remain in the OS vault; the internal vault service name is retained for compatibility.
+
+## Local MinIO compatibility test
+
+Verified against official MinIO release `RELEASE.2025-10-15T17-29-55Z`, built with `CGO_ENABLED=0` on Apple Silicon. A local HTTPS endpoint with a private test CA passed bucket listing, folder-marker creation and overwrite protection, multipart upload (6.75 MB), folder browsing, and byte-identical download. The SDK emitted a multipart-checksum validation warning; the test independently compared all downloaded bytes.
+
+An opt-in test is available: `HARBOR_MINIO_TEST=1 go test -race -run TestLocalMinIOIntegration -v .`. It requires a saved `MinIO Local` connection pointing to `https://127.0.0.1:59000`, path-style addressing, and its CA certificate. It creates a uniquely named test bucket and retains sample objects for manual browsing. It does not target AWS profiles.
