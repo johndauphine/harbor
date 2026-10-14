@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 type SaveResult struct {
@@ -48,11 +49,24 @@ func saveLocations(directory string) (SaveLocations, error) {
 	}
 	return result, nil
 }
-func (a *App) SaveDownload(ctx context.Context, id, directory, name string, overwrite bool) (SaveResult, error) {
+func (a *App) SaveDownload(ctx context.Context, id, directory, name string, overwrite bool) (result SaveResult, saveErr error) {
 	if !a.saveMu.TryLock() {
 		return SaveResult{}, errors.New("Another download is being saved")
 	}
 	defer a.saveMu.Unlock()
+	defer func() {
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		if t := a.transfers[id]; t != nil && t.Direction == "download" && t.Status == "completed" {
+			if saveErr != nil {
+				t.SaveError = saveErr.Error()
+			} else if !result.NeedsOverwrite {
+				t.SaveError = ""
+				t.SavedPath = result.Path
+				t.SavedAt = time.Now()
+			}
+		}
+	}()
 	if name == "" || name == "." || name == ".." || strings.ContainsAny(name, "/\\\x00") || !filepath.IsAbs(directory) {
 		return SaveResult{}, errors.New("Choose a folder and enter a filename without slashes")
 	}

@@ -20,6 +20,9 @@ func TestSaveDownloadLocationAndOverwrite(t *testing.T) {
 	if err != nil || result.NeedsOverwrite {
 		t.Fatalf("save: %+v %v", result, err)
 	}
+	if a.transfers["done"].SavedPath != result.Path || a.transfers["done"].SavedAt.IsZero() {
+		t.Fatal("saved location and timestamp missing")
+	}
 	b, _ := os.ReadFile(result.Path)
 	if string(b) != "fixture download" {
 		t.Fatal("incorrect saved content")
@@ -43,6 +46,15 @@ func TestSaveDownloadLocationAndOverwrite(t *testing.T) {
 	}
 	if _, err = a.SaveDownload(context.Background(), "unknown", dir, "unknown.txt", false); err == nil {
 		t.Fatal("unknown transfer accepted")
+	}
+	if a.transfers["done"].SaveError == "" {
+		t.Fatal("save failure not recorded")
+	}
+	if _, err = a.SaveDownload(context.Background(), "done", dir, "retry.txt", false); err != nil {
+		t.Fatal(err)
+	}
+	if a.transfers["done"].SaveError != "" {
+		t.Fatal("successful save did not clear error")
 	}
 	a.saveMu.Lock()
 	if _, err = a.SaveDownload(context.Background(), "done", dir, "second.txt", false); err == nil {

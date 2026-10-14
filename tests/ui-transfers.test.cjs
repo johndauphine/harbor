@@ -37,5 +37,12 @@ test('terminal transfers refresh once, preserve selection, and report failures a
  transfers=[{...transfer,ID:'retry',Status:'failed',Error:'Access denied'}];await context.transfers();assert.equal(browseCalls,2);assert.match(get('message').textContent,/Upload failed.*Access denied/);
  transfers[0].Status='running';await context.transfers();transfers[0].Status='completed';await context.transfers();assert.equal(browseCalls,3,'successful retry refreshes');
  transfers=[{...transfer,ID:'download',Direction:'download'}];await context.transfers();assert.equal(browseCalls,4);assert.match(get('message').textContent,/Download ready to save/);
+ const downloadRow=get('transfers').children[0],saveButton=downloadRow.children[1].children[0];
+ transfers[0].SavedPath='/chosen/file.txt';transfers[0].SavedAt='2026-10-14T18:00:00Z';transfers[0].CreatedAt='2026-10-14T17:59:00Z';
+ await context.transfers();await context.transfers();
+ assert.match(downloadRow.children[2].textContent,/Saved to \/chosen\/file.txt/);
+ assert.match(downloadRow.children[3].textContent,/Queued /);
+ assert.equal(downloadRow.children[1].children[0],saveButton);
+ transfers[0].SaveError='Permission denied';await context.transfers();assert.match(downloadRow.children[2].textContent,/Save failed: Permission denied/);
  transfers=[{...transfer,ID:'elsewhere',Bucket:'other-bucket'}];await context.transfers();assert.equal(browseCalls,4,'unrelated bucket must not replace current view');
 });

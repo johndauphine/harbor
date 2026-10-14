@@ -22,8 +22,8 @@ $('save-form').onsubmit=async e=>{
  e.preventDefault();if(savingDownload||!saveTransfer)return;savingDownload=true;$('save-confirm').disabled=true;$('save-cancel').disabled=true;
  try{const request={ID:saveTransfer.ID,Path:$('save-path').value,Name:$('save-name').value,Overwrite:false};let result=await api('save-download',request);
   if(result.NeedsOverwrite){if(!confirm('Replace the existing file?\n'+result.Path))return;result=await api('save-download',{...request,Overwrite:true})}
-  $('save-dialog').close();message('Saved to '+result.Path);
- }catch(e){$('save-error').textContent=e.message}finally{savingDownload=false;$('save-confirm').disabled=false;$('save-cancel').disabled=false}
+  $('save-dialog').close();message('Saved to '+result.Path);await transfers();
+ }catch(e){$('save-error').textContent=e.message;await transfers()}finally{savingDownload=false;$('save-confirm').disabled=false;$('save-cancel').disabled=false}
 };
 
 
@@ -38,8 +38,13 @@ async function transfers(){
   for(const [id,entry] of transferRows){if(!present.has(id)){entry.row.remove();transferRows.delete(id)}}
   for(const t of list){
    let entry=transferRows.get(t.ID);
-   if(!entry){const row=document.createElement('div'),label=document.createElement('span'),controls=document.createElement('span');row.append(label);row.append(controls);entry={row,label,controls,status:null};transferRows.set(t.ID,entry);$('transfers').append(row)}
+   if(!entry){const row=document.createElement('div'),label=document.createElement('span'),controls=document.createElement('span'),notice=document.createElement('div'),timestamp=document.createElement('time');row.className='transfer-row';notice.setAttribute('role','status');timestamp.className='transfer-time';row.append(label);row.append(controls);row.append(notice);row.append(timestamp);entry={row,label,controls,notice,timestamp,status:null};transferRows.set(t.ID,entry);$('transfers').append(row)}
    entry.label.textContent=t.Direction+' · '+t.Key+' · '+t.Status+' · '+t.Done.toLocaleString()+' / '+t.Total.toLocaleString()+' bytes '+(t.Error||'');
+   entry.timestamp.textContent=t.CreatedAt&&!t.CreatedAt.startsWith('0001-')?'Queued '+new Date(t.CreatedAt).toLocaleString():'';
+   const saved=t.SavedPath?'✓ Saved to '+t.SavedPath+(t.SavedAt&&!t.SavedAt.startsWith('0001-')?' · '+new Date(t.SavedAt).toLocaleString():''):'';
+   entry.notice.textContent=[saved,t.SaveError?'Save failed: '+t.SaveError:''].filter(Boolean).join(' — ');
+   entry.notice.className='transfer-notice'+(t.SaveError?' transfer-save-error':'');
+   entry.notice.hidden=!entry.notice.textContent;
    if(entry.status!==t.Status){
     entry.controls.replaceChildren();
     if(t.Status==='running'||t.Status==='queued')entry.controls.append(button('Cancel',()=>api('cancel',{ID:t.ID})));

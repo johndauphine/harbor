@@ -66,6 +66,10 @@ type Transfer struct {
 	Total     int64
 	Status    string
 	Error     string
+	CreatedAt time.Time
+	SavedAt   time.Time
+	SavedPath string
+	SaveError string
 	cancel    context.CancelFunc
 }
 type App struct {
@@ -337,7 +341,7 @@ func (a *App) QueueDownload(profile, bucket, key string) (string, error) {
 	return a.queue("download", profile, bucket, key, filepath.Join(dir, "download-"+id())), nil
 }
 func (a *App) queue(direction, profile, bucket, key, path string) string {
-	t := &Transfer{ID: id(), Direction: direction, ProfileID: profile, Bucket: bucket, Key: key, Path: path, Status: "queued"}
+	t := &Transfer{ID: id(), Direction: direction, ProfileID: profile, Bucket: bucket, Key: key, Path: path, Status: "queued", CreatedAt: time.Now()}
 	a.mu.Lock()
 	a.transfers[t.ID] = t
 	a.transferOrder = append(a.transferOrder, t.ID)
