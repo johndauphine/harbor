@@ -1,0 +1,4 @@
+build/bin/
+frontend/wailsjs/
+*.log
+.DS_Store
