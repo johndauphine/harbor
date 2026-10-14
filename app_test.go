@@ -1,15 +1,19 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"encoding/pem"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestBrowserBoundary(t *testing.T) {
@@ -42,6 +46,19 @@ func TestSecretsStayOutOfProfiles(t *testing.T) {
 	b, _ := os.ReadFile(a.configFile)
 	if strings.Contains(string(b), "fixture-") {
 		t.Fatal("secret persisted to metadata")
+	}
+	db, err := a.openStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw string
+	if err = db.QueryRow("SELECT metadata FROM profiles WHERE id=?", p.ID).Scan(&raw); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	var saved Profile
+	if json.Unmarshal([]byte(raw), &saved) != nil || saved.Name != "Test" {
+		t.Fatal("profile did not round-trip through SQLite")
 	}
 	if !strings.Contains(vault[p.ID], "fixture-secret") {
 		t.Fatal("vault missing secret")
@@ -76,5 +93,78 @@ func TestS3PrefixPagination(t *testing.T) {
 	}
 	if page.Next != "page2" || len(page.Objects) != 2 || !page.Objects[0].Folder || page.Objects[1].Size != 12 {
 		t.Fatalf("unexpected page %+v", page)
+	}
+}
+
+func TestDownloadCancelRetryAndUpload(t *testing.T) {
+	var slow atomic.Bool
+	slow.Store(true)
+	var uploaded atomic.Bool
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "PUT" {
+			data, _ := io.ReadAll(r.Body)
+			if !bytes.Contains(data, []byte("fixture-payload")) {
+				t.Error("upload payload missing")
+			}
+			uploaded.Store(true)
+			return
+		}
+		if slow.Load() {
+			w.Header().Set("Content-Length", "100000")
+			w.WriteHeader(200)
+			w.Write([]byte("partial"))
+			w.(http.Flusher).Flush()
+			<-r.Context().Done()
+			return
+		}
+		w.Header().Set("Content-Length", "15")
+		w.Write([]byte("fixture-payload"))
+	}))
+	defer server.Close()
+	a := NewApp()
+	a.ctx = context.Background()
+	a.profiles = []Profile{{ID: "fixture", Name: "Fixture", Region: "us-east-1", Endpoint: server.URL, PathStyle: true}}
+	raw, _ := json.Marshal(Secret{AccessKey: "fixture", SecretKey: "fixture"})
+	a.secretGet = func(string) (string, error) { return string(raw), nil }
+	ca := filepath.Join(t.TempDir(), "ca.pem")
+	os.WriteFile(ca, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: server.Certificate().Raw}), 0600)
+	a.profiles[0].CAFile = ca
+	path := filepath.Join(t.TempDir(), "download")
+	id := a.queue("download", "fixture", "bucket", "object", path)
+	wait := func(status string) {
+		t.Helper()
+		deadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(deadline) {
+			a.mu.Lock()
+			state := a.transfers[id].Status
+			a.mu.Unlock()
+			if state == status {
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		t.Fatalf("did not reach %s", status)
+	}
+	wait("running")
+	a.CancelTransfer(id)
+	wait("cancelled")
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatal("partial download committed")
+	}
+	slow.Store(false)
+	if err := a.RetryTransfer(id); err != nil {
+		t.Fatal(err)
+	}
+	wait("completed")
+	data, _ := os.ReadFile(path)
+	if string(data) != "fixture-payload" {
+		t.Fatalf("incorrect downloaded data %q", data)
+	}
+	upload := filepath.Join(t.TempDir(), "upload")
+	os.WriteFile(upload, []byte("fixture-payload"), 0600)
+	id = a.queue("upload", "fixture", "bucket", "object", upload)
+	wait("completed")
+	if !uploaded.Load() {
+		t.Fatal("upload not received")
 	}
 }

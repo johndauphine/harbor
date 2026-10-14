@@ -2,7 +2,7 @@
 
 Work in progress: a Go executable serving an embedded browser UI on loopback only.
 
-Current source includes saved connection profiles with OS credential vault storage, S3 bucket and prefix browsing, pagination, and a drafted transfer backend. Browser uploads now stage files locally and support background progress, cancellation, and retry. Downloads currently use a direct browser download and do not yet support queue cancellation or retry. This is an early test build; do not use production or federal data.
+Current source includes saved connection profiles with OS credential vault storage, S3 bucket and prefix browsing, pagination, and a drafted transfer backend. Browser uploads now stage files locally and support background progress, cancellation, and retry. Downloads also run in the background with progress, cancellation, and retry. Completed downloads have a Save file action. This is an early test build; do not use production or federal data.
 
 ## Development
 
@@ -12,18 +12,18 @@ Build: `go build -o harbor .`. Cross-build Windows with `GOOS=windows GOARCH=arm
 
 ## Verification
 
-`go test -race ./...` passes boundary tests for Host, Origin, session authorization, HTTPS-only endpoints, secret separation, and prefix pagination against a local TLS fixture. macOS ARM64 and Windows ARM64/AMD64 executables compile. Real AWS/on-premises integration and Windows runtime behavior are not yet verified.
+`go test -race ./...` passes actual local TLS upload/download, cancellation and retry tests, SQLite metadata round-trip tests, and boundary tests for Host, Origin, session authorization, HTTPS-only endpoints, secret separation, and prefix pagination against a local TLS fixture. macOS ARM64 and Windows ARM64/AMD64 executables compile. Real AWS/on-premises integration and native Windows x64 behavior are not yet verified. The preceding x64 build served its UI successfully in Windows ARM emulation; the updated build requires a fresh smoke test.
 
 ## Current limits
 
-- Upload staging is limited to 5 GiB and uses disk space; failed/cancelled upload files remain available for retry in the user cache.
-- Downloads are buffered by the browser and have no transfer-queue progress/cancel/retry yet.
+- Upload staging is limited to 5 GiB and uses disk space; failed/cancelled upload files remain available for retry in the user cache until normal shutdown. Successful uploads remove their staging file.
+- Saving completed downloads currently buffers the file in the browser; large downloads need a streaming save implementation. Cached downloads are removed on normal shutdown, but abrupt termination can leave cache files.
 - Connection editing, credential removal, FIPS build validation, signing, and audit logging are pending.
 - Do not infer FedRAMP compliance from these application-level safeguards.
 
 ## Security scope
 
-The server binds only to 127.0.0.1 and requires a random session token for API requests, checks Host and Origin, and serves bundled assets with a restrictive content security policy. Storage endpoints require HTTPS with certificate validation. Credentials use macOS Keychain or Windows Credential Manager through go-keyring; profile files contain connection metadata only.
+The server binds only to 127.0.0.1 and requires a random session token for API requests, checks Host and Origin, and serves bundled assets with a restrictive content security policy. Storage endpoints require HTTPS with certificate validation. Credentials use macOS Keychain or Windows Credential Manager through go-keyring; SQLite stores connection metadata only. Credentials are not stored in SQLite.
 
 Assumptions: patched OS and browser, disk encryption, protected user account, and approved storage endpoints. FedRAMP High compliance, validated cryptography configuration, real storage integrations, and platform packaging are not verified.
 

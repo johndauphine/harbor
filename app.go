@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -16,6 +17,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/zalando/go-keyring"
 	"io"
+	_ "modernc.org/sqlite"
 	"net/http"
 	"net/url"
 	"os"
@@ -79,17 +81,56 @@ type App struct {
 func NewApp() *App {
 	return &App{transfers: map[string]*Transfer{}, secretGet: func(id string) (string, error) { return keyring.Get("HarborS3", id) }, secretSet: func(id, v string) error { return keyring.Set("HarborS3", id, v) }}
 }
+func (a *App) openStore() (*sql.DB, error) {
+	if a.configFile == "" {
+		return nil, errors.New("Configuration store unavailable")
+	}
+	if err := os.MkdirAll(filepath.Dir(a.configFile), 0700); err != nil {
+		return nil, err
+	}
+	f, err := os.OpenFile(a.configFile, os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		return nil, err
+	}
+	f.Close()
+	db, err := sql.Open("sqlite", a.configFile)
+	if err != nil {
+		return nil, err
+	}
+	db.SetMaxOpenConns(1)
+	if _, err = db.Exec("PRAGMA busy_timeout=5000; CREATE TABLE IF NOT EXISTS profiles(id TEXT PRIMARY KEY,metadata TEXT NOT NULL)"); err != nil {
+		db.Close()
+		return nil, err
+	}
+	return db, nil
+}
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
 	dir, err := os.UserConfigDir()
 	if err != nil {
 		return
 	}
-	a.configFile = filepath.Join(dir, "HarborS3", "profiles.json")
-	b, err := os.ReadFile(a.configFile)
-	if err == nil {
-		_ = json.Unmarshal(b, &a.profiles)
+	a.configFile = filepath.Join(dir, "HarborS3", "profiles.db")
+	db, err := a.openStore()
+	if err != nil {
+		return
 	}
+	defer db.Close()
+	rows, err := db.Query("SELECT metadata FROM profiles ORDER BY id")
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var raw string
+		if rows.Scan(&raw) == nil {
+			var p Profile
+			if json.Unmarshal([]byte(raw), &p) == nil {
+				a.profiles = append(a.profiles, p)
+			}
+		}
+	}
+
 }
 func (a *App) shutdown(context.Context) {
 	a.mu.Lock()
@@ -98,6 +139,7 @@ func (a *App) shutdown(context.Context) {
 		if t.cancel != nil {
 			t.cancel()
 		}
+		_ = os.Remove(t.Path)
 	}
 }
 func id() string { b := make([]byte, 16); _, _ = rand.Read(b); return hex.EncodeToString(b) }
@@ -151,17 +193,16 @@ func (a *App) SaveProfile(p Profile, secret Secret) (Profile, error) {
 	if !found {
 		next = append(next, p)
 	}
-	b, _ := json.MarshalIndent(next, "", "  ")
-	if err := os.MkdirAll(filepath.Dir(a.configFile), 0700); err != nil {
+	db, err := a.openStore()
+	if err != nil {
 		return Profile{}, err
 	}
-	tmp := a.configFile + ".tmp"
-	if err := os.WriteFile(tmp, b, 0600); err != nil {
+	defer db.Close()
+	b, _ := json.Marshal(p)
+	if _, err = db.Exec("INSERT INTO profiles(id,metadata) VALUES(?,?) ON CONFLICT(id) DO UPDATE SET metadata=excluded.metadata", p.ID, string(b)); err != nil {
 		return Profile{}, err
 	}
-	if err := os.Rename(tmp, a.configFile); err != nil {
-		return Profile{}, err
-	}
+
 	a.profiles = next
 	return p, nil
 }
@@ -274,6 +315,23 @@ func (a *App) Browse(profileID, bucket, prefix, token string) (Page, error) {
 	}
 	return page, nil
 }
+func (a *App) QueueDownload(profile, bucket, key string) (string, error) {
+	if bucket == "" || key == "" {
+		return "", errors.New("Bucket and key required")
+	}
+	if _, e := a.client(a.ctx, profile); e != nil {
+		return "", e
+	}
+	dir, e := os.UserCacheDir()
+	if e != nil {
+		return "", e
+	}
+	dir = filepath.Join(dir, "HarborS3")
+	if e = os.MkdirAll(dir, 0700); e != nil {
+		return "", e
+	}
+	return a.queue("download", profile, bucket, key, filepath.Join(dir, "download-"+id())), nil
+}
 func (a *App) queue(direction, profile, bucket, key, path string) string {
 	t := &Transfer{ID: id(), Direction: direction, ProfileID: profile, Bucket: bucket, Key: key, Path: path, Status: "queued"}
 	a.mu.Lock()
@@ -294,8 +352,12 @@ func (a *App) Transfers() []Transfer {
 func (a *App) CancelTransfer(id string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if t := a.transfers[id]; t != nil && t.cancel != nil {
-		t.cancel()
+	if t := a.transfers[id]; t != nil {
+		if t.cancel != nil {
+			t.cancel()
+		} else if t.Status == "queued" {
+			t.Status = "cancelled"
+		}
 	}
 }
 func (a *App) RetryTransfer(id string) error {
@@ -328,6 +390,10 @@ func (a *App) run(id string) {
 	defer cancel()
 	a.mu.Lock()
 	t := a.transfers[id]
+	if t.Status == "cancelled" {
+		a.mu.Unlock()
+		return
+	}
 	t.cancel = cancel
 	t.Status = "running"
 	spec := *t
@@ -346,6 +412,9 @@ func (a *App) run(id string) {
 	} else {
 		t.Status = "completed"
 		t.Done = t.Total
+		if t.Direction == "upload" {
+			_ = os.Remove(t.Path)
+		}
 	}
 }
 func (a *App) execute(ctx context.Context, t Transfer) error {

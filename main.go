@@ -8,8 +8,6 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"io"
 	"io/fs"
 	"net"
@@ -121,35 +119,35 @@ func webHandler(a *App, host, token string) http.Handler {
 			json.NewEncoder(w).Encode(id)
 			return
 		}
-		if r.URL.Path == "/api/download" {
-			var in struct {
-				ProfileID string
-				Bucket    string
-				Key       string
-			}
-			r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+		if r.URL.Path == "/api/file" {
+			var in struct{ ID string }
+			r.Body = http.MaxBytesReader(w, r.Body, 1024)
 			if json.NewDecoder(r.Body).Decode(&in) != nil {
 				http.Error(w, "Invalid request", 400)
 				return
 			}
-			c, err := a.client(r.Context(), in.ProfileID)
-			if err != nil {
-				http.Error(w, "Connection unavailable", 400)
+			a.mu.Lock()
+			t := a.transfers[in.ID]
+			var path string
+			if t != nil && t.Direction == "download" && t.Status == "completed" {
+				path = t.Path
+			}
+			a.mu.Unlock()
+			if path == "" {
+				http.Error(w, "Completed download not found", 404)
 				return
 			}
-			object, err := c.GetObject(r.Context(), &s3.GetObjectInput{Bucket: aws.String(in.Bucket), Key: aws.String(in.Key)})
+			f, err := os.Open(path)
 			if err != nil {
-				http.Error(w, "Download failed", 400)
+				http.Error(w, "File unavailable", 404)
 				return
 			}
-			defer object.Body.Close()
+			defer f.Close()
 			w.Header().Set("Content-Type", "application/octet-stream")
-			if object.ContentLength != nil {
-				w.Header().Set("Content-Length", fmt.Sprint(*object.ContentLength))
-			}
-			io.Copy(w, object.Body)
+			io.Copy(w, f)
 			return
 		}
+
 		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 		var in struct {
 			Profile   Profile
@@ -159,6 +157,7 @@ func webHandler(a *App, host, token string) http.Handler {
 			Prefix    string
 			Token     string
 			ID        string
+			Key       string
 		}
 		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 			http.Error(w, "Invalid request", 400)
@@ -177,6 +176,8 @@ func webHandler(a *App, host, token string) http.Handler {
 			value, err = a.Buckets(in.ProfileID)
 		case "/api/browse":
 			value, err = a.Browse(in.ProfileID, in.Bucket, in.Prefix, in.Token)
+		case "/api/download":
+			value, err = a.QueueDownload(in.ProfileID, in.Bucket, in.Key)
 		case "/api/transfers":
 			value = a.Transfers()
 		case "/api/cancel":
