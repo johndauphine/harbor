@@ -6,7 +6,7 @@ Current source includes saved connection profiles with OS credential vault stora
 
 ## Development
 
-Requires Go 1.26.9 or newer; use the patched version recorded in `go.mod`. Run `go test ./...` then `go run .`. Open the session URL printed by the program and keep it private. Stop with Ctrl+C. Source has no dependency on Node, Wails, WebView2, or a separate server.
+Requires Go 1.26.9 or newer; use the patched version recorded in `go.mod`. Run `go test ./...` then `go run .`. Harbor opens your default browser automatically. The session URL is also printed as a fallback; keep it private. Use `--no-browser` for unattended startup or to open the URL yourself. Stop with Ctrl+C. Source has no dependency on Node, Wails, WebView2, or a separate server.
 
 Build: `go build -o harbor .`. Cross-build Windows with `GOOS=windows GOARCH=arm64 go build -o harbor.exe .` (or `amd64`).
 

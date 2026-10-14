@@ -24,6 +24,7 @@ import (
 var assets embed.FS
 
 func main() {
+	noBrowser := flag.Bool("no-browser", false, "Print the session URL without opening the default browser")
 	showVersion := flag.Bool("version", false, "Print build information and exit")
 	port := flag.Int("port", 0, "Local port (0 chooses an available port)")
 	dbPath := flag.String("db", "", "SQLite path (default: ~/.harbor/profiles.db)")
@@ -61,6 +62,15 @@ func main() {
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
 	defer signal.Stop(stop)
+	if !*noBrowser {
+		browserCtx, cancelBrowser := context.WithCancel(context.Background())
+		defer cancelBrowser()
+		go func() {
+			if err := openBrowser(browserCtx, "http://"+host+"/#"+token); err != nil && browserCtx.Err() == nil {
+				fmt.Fprintln(os.Stderr, "Could not open the default browser. Open the session URL printed above manually.")
+			}
+		}()
+	}
 	if err = serveUntilStopped(app, server, listener, stop); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)

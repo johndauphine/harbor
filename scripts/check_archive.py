@@ -60,7 +60,7 @@ def main():
         environment = dict(os.environ, HOME=str(root), USERPROFILE=str(root),
                            XDG_CACHE_HOME=str(root / "cache"), LOCALAPPDATA=str(root / "cache"))
         flags = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
-        process = subprocess.Popen([str(executable), "--db", str(settings)], stdout=subprocess.PIPE,
+        process = subprocess.Popen([str(executable), "--no-browser", "--db", str(settings)], stdout=subprocess.PIPE,
                                    stderr=subprocess.PIPE, text=True, encoding="utf-8", env=environment, creationflags=flags)
         lines = queue.Queue()
         def read_lines():

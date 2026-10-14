@@ -39,7 +39,7 @@ def package(binary, output, metadata, timestamp):
         "Verify the archive against SHA256SUMS from your trusted download source.\n"
         "Open a terminal in this folder and run "
         + (".\\harbor.exe" if system == "windows" else "./harbor")
-        + ". Open the private local URL printed by Harbor in your browser.\n"
+        + ". Harbor opens your default browser. If it cannot, open the printed local URL yourself. Use --no-browser to skip automatic opening.\n"
         "Keep that URL private. Press Ctrl+C in the terminal to stop Harbor.\n"
         "Use --version for build details and --help for command-line options.\n"
         "Settings default to .harbor/profiles.db under your user home directory.\n"
