@@ -31,7 +31,20 @@ python3 scripts/package_release.py --version v0.1.0-rc.1 --output dist
 
 Choose the version for the candidate being evaluated. The script rejects modified source for candidate and release labels. Developers may use `--version development-local --allow-dirty`; those archives explicitly record the modified-source state. The script builds all three targets with embedded version labels, normalizes archive timestamps/ownership/permissions, includes build metadata and a short startup guide, and writes checksums. Repeated packaging with the same source, compiler, Python/compression runtime and options is repeatable. Signing/timestamping changes the final bytes.
 
-Each archive contains only the executable, `README.txt`, `build-info.json`, and `LICENSE` when that file is present. No settings, credentials, caches, session URLs or test data are included. `--version` reports the label, Git revision, toolchain and target. CI uses a development revision label and uploads the archives as workflow artifacts; it does not publish releases.
+Each archive contains only the executable, `README.txt`, `build-info.json`, Harbor's Apache 2.0 `LICENSE`, and `THIRD_PARTY_NOTICES.txt`. No settings, credentials, caches, session URLs or test data are included. `--version` reports the label, Git revision, toolchain and target. CI uses a development revision label and uploads the archives as workflow artifacts; it does not publish releases.
+
+## Preserving dependency notices
+
+`THIRD_PARTY_NOTICES.txt` preserves the license, notice, copyright, patent and author files supplied by the actual non-test runtime imports across all three shipped targets. It includes the Go runtime/toolchain license and applicable vendored-package notices, AWS SDK/Smithy notices, and the bundled third-party notices supplied by the SQLite/libc modules. Module-wide upstream documents are kept intact; some describe optional or test-only components without implying those components are linked into Harbor.
+
+After changing dependencies or the Go toolchain, run:
+
+```sh
+python3 scripts/generate_notices.py
+python3 scripts/generate_notices.py --check
+```
+
+Review and commit the generated changes. CI and the packaging command check for stale notices; every archive must contain both Harbor's `LICENSE` and the upstream notices. This preserves the upstream attribution text and is not a claim of legal certification.
 
 ## Checksums, extraction and smoke checks
 

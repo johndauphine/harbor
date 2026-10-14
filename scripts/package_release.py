@@ -13,6 +13,8 @@ import tarfile
 import tempfile
 import zipfile
 
+from generate_notices import render_notices
+
 ROOT = Path(__file__).resolve().parents[1]
 TARGETS = (("darwin", "arm64"), ("windows", "arm64"), ("windows", "amd64"))
 
@@ -43,15 +45,18 @@ def package(binary, output, metadata, timestamp):
         "Settings default to .harbor/profiles.db under your user home directory.\n"
         "Credentials use the operating system credential vault.\n"
         "Publisher signing is not established by a checksum.\n"
+        "See LICENSE for Harbor and THIRD_PARTY_NOTICES.txt for upstream notices.\n"
     )
     members = {
         executable: (binary.read_bytes(), 0o755),
         "README.txt": (instructions.encode(), 0o644),
         "build-info.json": ((json.dumps(metadata, sort_keys=True, indent=2) + "\n").encode(), 0o644),
     }
-    license_file = ROOT / "LICENSE"
-    if license_file.exists():
-        members["LICENSE"] = (license_file.read_bytes(), 0o644)
+    for name in ("LICENSE", "THIRD_PARTY_NOTICES.txt"):
+        document = ROOT / name
+        if not document.is_file():
+            raise RuntimeError(f"Required distribution document is missing: {name}")
+        members[name] = (document.read_bytes(), 0o644)
     if system == "darwin":
         with output.open("wb") as raw:
             with gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0) as compressed:
@@ -85,6 +90,9 @@ def main():
     dirty = bool(run("git", "status", "--porcelain"))
     if dirty and not (args.allow_dirty and args.version.startswith("development-")):
         parser.error("candidate/release archives require a clean checkout; --allow-dirty is only for development labels")
+    notices = ROOT / "THIRD_PARTY_NOTICES.txt"
+    if not notices.exists() or notices.read_bytes() != render_notices().encode("utf-8"):
+        parser.error("third-party notices are missing or stale; regenerate, review and commit them before packaging")
     revision = run("git", "rev-parse", "HEAD")
     timestamp = int(run("git", "show", "-s", "--format=%ct", "HEAD"))
     toolchain = run("go", "env", "GOVERSION")
