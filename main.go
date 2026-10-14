@@ -8,6 +8,9 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"io"
 	"io/fs"
 	"net"
 	"net/http"
@@ -77,6 +80,74 @@ func webHandler(a *App, host, token string) http.Handler {
 		}
 		if r.Method != "POST" {
 			http.Error(w, "POST required", 405)
+			return
+		}
+		if r.URL.Path == "/api/upload" {
+			r.Body = http.MaxBytesReader(w, r.Body, 5<<30)
+			profile, bucket, key := r.URL.Query().Get("profile"), r.URL.Query().Get("bucket"), r.URL.Query().Get("key")
+			if bucket == "" || key == "" {
+				http.Error(w, "Bucket and key required", 400)
+				return
+			}
+			if _, err := a.client(r.Context(), profile); err != nil {
+				http.Error(w, "Connection unavailable", 400)
+				return
+			}
+			dir, err := os.UserCacheDir()
+			if err != nil {
+				http.Error(w, "Cache unavailable", 500)
+				return
+			}
+			dir = dir + "/HarborS3"
+			if err = os.MkdirAll(dir, 0700); err != nil {
+				http.Error(w, "Cache unavailable", 500)
+				return
+			}
+			f, err := os.CreateTemp(dir, "upload-*")
+			if err != nil {
+				http.Error(w, "Cache unavailable", 500)
+				return
+			}
+			path := f.Name()
+			_, err = io.Copy(f, r.Body)
+			closeErr := f.Close()
+			if err != nil || closeErr != nil {
+				os.Remove(path)
+				http.Error(w, "Upload staging failed", 400)
+				return
+			}
+			id := a.queue("upload", profile, bucket, key, path)
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(id)
+			return
+		}
+		if r.URL.Path == "/api/download" {
+			var in struct {
+				ProfileID string
+				Bucket    string
+				Key       string
+			}
+			r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+			if json.NewDecoder(r.Body).Decode(&in) != nil {
+				http.Error(w, "Invalid request", 400)
+				return
+			}
+			c, err := a.client(r.Context(), in.ProfileID)
+			if err != nil {
+				http.Error(w, "Connection unavailable", 400)
+				return
+			}
+			object, err := c.GetObject(r.Context(), &s3.GetObjectInput{Bucket: aws.String(in.Bucket), Key: aws.String(in.Key)})
+			if err != nil {
+				http.Error(w, "Download failed", 400)
+				return
+			}
+			defer object.Body.Close()
+			w.Header().Set("Content-Type", "application/octet-stream")
+			if object.ContentLength != nil {
+				w.Header().Set("Content-Length", fmt.Sprint(*object.ContentLength))
+			}
+			io.Copy(w, object.Body)
 			return
 		}
 		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
