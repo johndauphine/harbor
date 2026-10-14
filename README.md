@@ -44,3 +44,7 @@ An opt-in test is available: `HARBOR_MINIO_TEST=1 go test -race -run TestLocalMi
 Select a file and use Delete file. Confirmation shows its bucket and full key. Harbor checks the current ETag before deletion and sends an If-Match condition. No recursive folder or bucket deletion is implemented. Versioning and retention rules determine whether a delete marker is created or a file is permanently removed; version management is not yet exposed.
 
 The local MinIO release ignores If-Match on DeleteObject, so its preflight catches stale selections but cannot prevent a concurrent replacement between the check and delete. The live local test verifies stale-selection rejection and deletion using only a disposable generated object. No AWS objects were deleted during development.
+
+## Transfer refresh
+
+The browser automatically refreshes the relevant current listing when an upload or download completes, preserving the selected file if it remains visible. Terminal status changes are reported once, and failed transfers include their error in the status field. Completed downloads say "ready to save" because browser saving is a separate step. Transfers in other buckets do not change the user's current location. Frontend regression check: `node --test tests/ui-transfers.test.cjs` (Node is only required for this developer test).
