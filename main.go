@@ -40,7 +40,7 @@ func main() {
 	token := hex.EncodeToString(tokenBytes)
 	host := listener.Addr().String()
 	server := &http.Server{Handler: webHandler(app, host, token), ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16384}
-	fmt.Printf("S3 Browser\nOpen http://%s/#%s\nKeep this session URL private. Press Ctrl+C to stop.\n", host, token)
+	fmt.Printf("Harbor S3 Browser\nOpen http://%s/#%s\nKeep this session URL private. Press Ctrl+C to stop.\n", host, token)
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt)
 	go func() {

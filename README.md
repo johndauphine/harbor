@@ -1,4 +1,4 @@
-# S3 Browser
+# Harbor S3 Browser
 
 Work in progress: a Go executable serving an embedded browser UI on loopback only.
 
