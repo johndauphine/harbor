@@ -40,6 +40,7 @@ func TestSecretsStayOutOfProfiles(t *testing.T) {
 	vault := map[string]string{}
 	a.secretSet = func(k, v string) error { vault[k] = v; return nil }
 	a.secretGet = func(k string) (string, error) { return vault[k], nil }
+	a.secretDelete = func(k string) error { delete(vault, k); return nil }
 	p, e := a.SaveProfile(Profile{Name: "Test", Region: "us-east-1"}, Secret{AccessKey: "fixture-access", SecretKey: "fixture-secret"})
 	if e != nil {
 		t.Fatal(e)
@@ -61,7 +62,7 @@ func TestSecretsStayOutOfProfiles(t *testing.T) {
 	if json.Unmarshal([]byte(raw), &saved) != nil || saved.Name != "Test" {
 		t.Fatal("profile did not round-trip through SQLite")
 	}
-	if !strings.Contains(vault[p.ID], "fixture-secret") {
+	if !strings.Contains(vault[credentialID(p)], "fixture-secret") {
 		t.Fatal("vault missing secret")
 	}
 }
@@ -202,7 +203,6 @@ func TestDownloadCancelRetryAndUpload(t *testing.T) {
 		t.Fatal(err)
 	}
 	wait("completed")
-	a.shutdown(context.Background())
 	data, _ = os.ReadFile(result.Path)
 	if string(data) != "fixture-payload" {
 		t.Fatal("shutdown removed saved download")
@@ -215,6 +215,10 @@ func TestDownloadCancelRetryAndUpload(t *testing.T) {
 	}
 	wait("completed")
 	a.shutdown(context.Background())
+	data, _ = os.ReadFile(result.Path)
+	if string(data) != "fixture-payload" {
+		t.Fatal("shutdown removed saved download")
+	}
 	data, _ = os.ReadFile(upload)
 	if string(data) != "fixture-payload" {
 		t.Fatal("upload removed original local file")
@@ -296,31 +300,32 @@ func TestEditProfilePreservesAndReplacesCredentials(t *testing.T) {
 	vault := map[string]string{}
 	a.secretSet = func(k, v string) error { vault[k] = v; return nil }
 	a.secretGet = func(k string) (string, error) { return vault[k], nil }
+	a.secretDelete = func(k string) error { delete(vault, k); return nil }
 	p, err := a.SaveProfile(Profile{Name: "Original", Region: "us-east-1"}, Secret{AccessKey: "old-access", SecretKey: "old-secret", SessionToken: "old-token"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	old := vault[p.ID]
+	old := vault[credentialID(p)]
 	p.Name = "Updated"
 	if _, err = a.SaveProfile(p, Secret{}); err != nil {
 		t.Fatal(err)
 	}
-	if vault[p.ID] != old || len(a.Profiles()) != 1 {
+	if vault[credentialID(p)] != old || len(a.Profiles()) != 1 {
 		t.Fatal("metadata edit changed credentials or created duplicate")
 	}
-	if _, err = a.SaveProfile(p, Secret{AccessKey: "updated-access"}); err != nil {
+	if p, err = a.SaveProfile(p, Secret{AccessKey: "updated-access"}); err != nil {
 		t.Fatal(err)
 	}
 	var partial Secret
-	json.Unmarshal([]byte(vault[p.ID]), &partial)
+	json.Unmarshal([]byte(vault[credentialID(p)]), &partial)
 	if partial.AccessKey != "updated-access" || partial.SecretKey != "old-secret" {
 		t.Fatal("single field edit did not preserve the other key")
 	}
-	if _, err = a.SaveProfile(p, Secret{AccessKey: "new-access", SecretKey: "new-secret"}); err != nil {
+	if p, err = a.SaveProfile(p, Secret{AccessKey: "new-access", SecretKey: "new-secret"}); err != nil {
 		t.Fatal(err)
 	}
 	var replacement Secret
-	if err = json.Unmarshal([]byte(vault[p.ID]), &replacement); err != nil {
+	if err = json.Unmarshal([]byte(vault[credentialID(p)]), &replacement); err != nil {
 		t.Fatal(err)
 	}
 	if replacement.AccessKey != "new-access" || replacement.SessionToken != "" {
@@ -334,6 +339,7 @@ func TestDeleteProfileRemovesOnlyLocalSettingsAndCredentials(t *testing.T) {
 	vault := map[string]string{}
 	a.secretSet = func(k, v string) error { vault[k] = v; return nil }
 	a.secretGet = func(k string) (string, error) { return vault[k], nil }
+	a.secretDelete = func(k string) error { delete(vault, k); return nil }
 	fail := true
 	a.secretDelete = func(k string) error {
 		if fail {
@@ -349,10 +355,20 @@ func TestDeleteProfileRemovesOnlyLocalSettingsAndCredentials(t *testing.T) {
 	if err = a.DeleteProfile(p.ID); err == nil {
 		t.Fatal("expected vault failure")
 	}
-	if len(a.Profiles()) != 1 || vault[p.ID] == "" {
-		t.Fatal("failed deletion altered profile")
+	if len(a.Profiles()) != 0 || vault[credentialID(p)] == "" {
+		t.Fatal("committed deletion should remove metadata and retain credentials for retry")
 	}
 	fail = false
+	if err = a.RetryCredentialCleanup(); err != nil {
+		t.Fatal(err)
+	}
+	if vault[credentialID(p)] != "" {
+		t.Fatal("retry left deleted credentials")
+	}
+	p, err = a.SaveProfile(Profile{Name: "Disposable", Region: "us-east-1"}, Secret{AccessKey: "test", SecretKey: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
 	a.transfers["active"] = &Transfer{ProfileID: p.ID, Status: "running"}
 	if err = a.DeleteProfile(p.ID); err == nil {
 		t.Fatal("deleted active connection")
@@ -361,7 +377,7 @@ func TestDeleteProfileRemovesOnlyLocalSettingsAndCredentials(t *testing.T) {
 	if err = a.DeleteProfile(p.ID); err != nil {
 		t.Fatal(err)
 	}
-	if len(a.Profiles()) != 0 || vault[p.ID] != "" {
+	if len(a.Profiles()) != 0 || vault[credentialID(p)] != "" {
 		t.Fatal("profile or credentials remain")
 	}
 	db, err := a.openStore()

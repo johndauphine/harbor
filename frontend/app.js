@@ -1,4 +1,4 @@
-const $=id=>document.getElementById(id);let session=location.hash.slice(1)||sessionStorage.getItem('harbor-session');if(session){sessionStorage.setItem('harbor-session',session);history.replaceState(null,'',location.pathname)}let profile='',bucket='',prefix='',next='',objects=[],selected=null,selectedKeys=new Set(),deleting=false,browseRequest=0,connectionRequest=0,listingContext=null,listingState='empty',objectFilter='',filterLocation='',sortKey='name',sortAscending=true;async function api(route,data={}){const r=await fetch('/api/'+route,{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+session},body:JSON.stringify(data)});let v=await r.json();if(!r.ok)throw Error(v.error||'Request failed');return v}function message(s){$('message').textContent=s;$('message').className=/failed|error|unable|could not|denied/i.test(s)?'status-error':/completed|saved|deleted|created/i.test(s)?'status-success':''}function action(fn){return async()=>{try{await fn()}catch(e){message(e.message)}}}function button(text,fn){const b=document.createElement('button');b.type='button';b.textContent=text;b.onclick=action(async()=>{await fn()});return b}async function selectConnection(p){
+const $=id=>document.getElementById(id);let session=location.hash.slice(1)||sessionStorage.getItem('harbor-session');if(session){sessionStorage.setItem('harbor-session',session);history.replaceState(null,'',location.pathname)}let profile='',bucket='',prefix='',next='',objects=[],selected=null,selectedKeys=new Set(),deleting=false,browseRequest=0,connectionRequest=0,listingContext=null,listingState='empty',objectFilter='',filterLocation='',sortKey='name',sortAscending=true;async function api(route,data={}){const r=await fetch('/api/'+route,{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+session},body:JSON.stringify(data)});let v=await r.json();if(!r.ok)throw Error(v.error||'Request failed');return v}function message(s){$('message').textContent=s;$('message').className=/credential cleanup (?:is )?pending/i.test(s)?'status-warning':/failed|error|unable|could not|denied/i.test(s)?'status-error':/completed|saved|deleted|created/i.test(s)?'status-success':''}function action(fn){return async()=>{try{await fn()}catch(e){message(e.message)}}}function button(text,fn){const b=document.createElement('button');b.type='button';b.textContent=text;b.onclick=action(async()=>{await fn()});return b}async function selectConnection(p){
  const request=++connectionRequest;browseRequest++;profile=p.ID;bucket='';prefix='';objectFilter='';filterLocation='';$('path').value='';$('object-search').value='';closePathSuggestions();renderBreadcrumbs();clearListing();$('buckets').replaceChildren();message('Loading buckets…');
  for(const row of $('profiles').children){const b=row.children[0];b.classList[b.dataset.profile===p.ID?'add':'remove']('active');b.setAttribute('aria-pressed',String(b.dataset.profile===p.ID))}
  let buckets;try{buckets=await api('buckets',{ProfileID:p.ID})}catch(e){if(request!==connectionRequest||profile!==p.ID)return;throw e}
@@ -16,9 +16,9 @@ async function profiles(){
 }
 async function deleteConnection(p){
  if(!confirm('Delete connection “'+p.Name+'”?\nThis removes its saved settings and credentials from this computer. Buckets and files will not be deleted.'))return;
- await api('delete-profile',{ProfileID:p.ID});
+ const result=await api('delete-profile',{ProfileID:p.ID});
  if(profile===p.ID){profile='';bucket='';prefix='';objectFilter='';filterLocation='';connectionRequest++;browseRequest++;closePathSuggestions();$('path').value='';$('object-search').value='';$('buckets').replaceChildren();renderBreadcrumbs();clearListing()}
- await profiles();message('Deleted connection: '+p.Name);
+ await profiles();message(result?.Warning||'Deleted connection: '+p.Name);
 }
 // Keep each visible listing attached to the location that produced it.
 function currentListing(context=listingContext){return !!context&&context.Connection===connectionRequest&&profile===context.ProfileID&&bucket===context.Bucket&&prefix===context.Prefix&&objectFilter===context.Filter}
@@ -43,10 +43,12 @@ async function browse(append=false,options={}){
  e.preventDefault();$('connection-error').textContent='';
  try{
  const f=new FormData(e.target);
- const saved=await api('save',{Profile:{ID:editingConnection,Name:f.get('Name'),Endpoint:f.get('Endpoint'),Region:f.get('Region'),PathStyle:f.has('PathStyle'),CAFile:f.get('CAFile')},Secret:{AccessKey:credentialValue('AccessKey'),SecretKey:credentialValue('SecretKey'),SessionToken:credentialValue('SessionToken')}});
+ const result=await api('save',{Profile:{ID:editingConnection,Name:f.get('Name'),Endpoint:f.get('Endpoint'),Region:f.get('Region'),PathStyle:f.has('PathStyle'),CAFile:f.get('CAFile')},Secret:{AccessKey:credentialValue('AccessKey'),SecretKey:credentialValue('SecretKey'),SessionToken:credentialValue('SessionToken')}});
+ const saved=result?.Value||result;
  e.target.reset();$('connection').close();await profiles();
- const index=connectionProfiles.findIndex(p=>p.ID===saved.ID);if(index>=0)await $('profiles').children[index].children[0].click();
- message('Connection saved securely');
+ const updated=connectionProfiles.find(p=>p.ID===saved.ID);
+ let navigationError='';if(updated){try{await selectConnection(updated)}catch(e){navigationError='; bucket listing failed: '+e.message}}
+ message((result?.Warning||'Connection saved securely')+navigationError);
  }catch(e){$('connection-error').textContent=e.message}
 };$('refresh').onclick=action(()=>browse());$('go').onclick=action(openTypedPath);$('up').onclick=action(async()=>{prefix=prefix.replace(/[^/]+\/$/,'');await browse()});$('test').onclick=action(async()=>message(await api('test',{ProfileID:profile})));$('more').onclick=action(()=>browse(true));action(profiles)();
 

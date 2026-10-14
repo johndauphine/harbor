@@ -52,6 +52,12 @@ func saveLocations(directory string) (SaveLocations, error) {
 	return result, nil
 }
 func (a *App) SaveDownload(ctx context.Context, id, directory, name string, overwrite bool) (result SaveResult, saveErr error) {
+	var done func()
+	ctx, done, saveErr = a.beginOperation(ctx)
+	if saveErr != nil {
+		return SaveResult{}, saveErr
+	}
+	defer done()
 	if !a.saveMu.TryLock() {
 		return SaveResult{}, errors.New("Another download is being saved")
 	}
@@ -194,6 +200,11 @@ func uploadLocations(directory string) (SaveLocations, error) {
 	return result, nil
 }
 func (a *App) QueueLocalUpload(ctx context.Context, profile, bucket, key, path string) (string, error) {
+	ctx, done, err := a.beginOperation(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer done()
 	if bucket == "" || key == "" || strings.HasSuffix(key, "/") {
 		return "", errors.New("Choose a destination file")
 	}
@@ -238,5 +249,10 @@ func (a *App) QueueLocalUpload(ctx context.Context, profile, bucket, key, path s
 		os.Remove(stagedPath)
 		return "", errors.New("Could not stage upload; check file access and the 5 GiB limit")
 	}
-	return a.queue("upload", profile, bucket, key, stagedPath), nil
+	transferID := a.queue("upload", profile, bucket, key, stagedPath)
+	if transferID == "" {
+		os.Remove(stagedPath)
+		return "", errShuttingDown
+	}
+	return transferID, nil
 }

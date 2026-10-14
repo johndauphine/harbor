@@ -6,6 +6,7 @@ import (
 	"embed"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -15,6 +16,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -25,13 +27,19 @@ func main() {
 	port := flag.Int("port", 0, "Local port (0 chooses an available port)")
 	dbPath := flag.String("db", "", "SQLite path (default: ~/.harbor/profiles.db)")
 	flag.Parse()
+	store, err := acquireStoreLock(*dbPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	defer store.Close()
 	listener, err := net.Listen("tcp4", fmt.Sprintf("127.0.0.1:%d", *port))
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 	app := NewApp()
-	app.configFile = *dbPath
+	app.configFile = store.path
 	app.startup(context.Background())
 	tokenBytes := make([]byte, 32)
 	if _, err = rand.Read(tokenBytes); err != nil {
@@ -42,18 +50,40 @@ func main() {
 	server := &http.Server{Handler: webHandler(app, host, token), ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16384}
 	fmt.Printf("Harbor S3 Browser\nOpen http://%s/#%s\nKeep this session URL private. Press Ctrl+C to stop.\n", host, token)
 	stop := make(chan os.Signal, 1)
-	signal.Notify(stop, os.Interrupt)
-	go func() {
-		<-stop
-		app.shutdown(context.Background())
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_ = server.Shutdown(ctx)
-	}()
-	if err = server.Serve(listener); err != nil && err != http.ErrServerClosed {
+	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(stop)
+	if err = serveUntilStopped(app, server, listener, stop); err != nil {
 		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
 	}
+
 }
+
+// Keep shutdown on the main goroutine: Serve returning must not exit the
+// process before transfers and active requests have finished unwinding.
+func serveUntilStopped(app *App, server *http.Server, listener net.Listener, stop <-chan os.Signal) error {
+	served := make(chan error, 1)
+	go func() { served <- server.Serve(listener) }()
+	var serveErr error
+	select {
+	case <-stop:
+	case serveErr = <-served:
+	}
+	app.beginShutdown()
+	requestCtx, cancelRequests := context.WithTimeout(context.Background(), 5*time.Second)
+	if err := server.Shutdown(requestCtx); err != nil {
+		_ = server.Close()
+	}
+	cancelRequests()
+	transferCtx, cancelTransfers := context.WithTimeout(context.Background(), 25*time.Second)
+	defer cancelTransfers()
+	shutdownErr := app.shutdown(transferCtx)
+	if serveErr == http.ErrServerClosed {
+		serveErr = nil
+	}
+	return errors.Join(serveErr, shutdownErr)
+}
+
 func webHandler(a *App, host, token string) http.Handler {
 	files, _ := fs.Sub(assets, "frontend")
 	static := http.FileServer(http.FS(files))
@@ -82,6 +112,16 @@ func webHandler(a *App, host, token string) http.Handler {
 			http.Error(w, "POST required", 405)
 			return
 		}
+		operationCtx, done, operationErr := a.beginOperation(r.Context())
+		if operationErr != nil {
+			http.Error(w, operationErr.Error(), http.StatusServiceUnavailable)
+			return
+		}
+		defer done()
+		r = r.WithContext(operationCtx)
+		body := r.Body
+		stopBodyClose := context.AfterFunc(operationCtx, func() { _ = body.Close() })
+		defer stopBodyClose()
 		if r.URL.Path == "/api/upload" {
 			r.Body = http.MaxBytesReader(w, r.Body, 5<<30)
 			profile, bucket, key := r.URL.Query().Get("profile"), r.URL.Query().Get("bucket"), r.URL.Query().Get("key")
@@ -117,6 +157,11 @@ func webHandler(a *App, host, token string) http.Handler {
 				return
 			}
 			id := a.queue("upload", profile, bucket, key, path)
+			if id == "" {
+				os.Remove(path)
+				http.Error(w, errShuttingDown.Error(), http.StatusServiceUnavailable)
+				return
+			}
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(id)
 			return
@@ -191,6 +236,13 @@ func webHandler(a *App, host, token string) http.Handler {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		if err != nil {
+			var cleanup *credentialCleanupError
+			if errors.As(err, &cleanup) {
+				// The settings change committed; report pending cleanup without
+				// inviting the browser to repeat a successful mutation.
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{"Value": value, "Warning": cleanup.Error()})
+				return
+			}
 			w.WriteHeader(400)
 			_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 			return

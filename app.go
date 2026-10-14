@@ -17,6 +17,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/zalando/go-keyring"
 	"io"
+	"log"
 	_ "modernc.org/sqlite"
 	"net/http"
 	"net/url"
@@ -28,6 +29,7 @@ import (
 )
 
 type Profile struct {
+	credentialID string
 	ID           string
 	Name         string
 	Endpoint     string
@@ -61,6 +63,7 @@ type downloadTarget struct {
 }
 
 type Transfer struct {
+	attempt     uint64
 	destination *downloadTarget
 	ID          string
 	Direction   string
@@ -80,7 +83,13 @@ type Transfer struct {
 }
 type App struct {
 	ctx           context.Context
+	appCancel     context.CancelFunc
 	mu            sync.Mutex
+	profileMu     sync.Mutex
+	closing       bool
+	workers       sync.WaitGroup
+	operations    map[string]context.CancelFunc
+	shutdownDone  chan struct{}
 	profiles      []Profile
 	transfers     map[string]*Transfer
 	transferOrder []string
@@ -89,6 +98,7 @@ type App struct {
 	secretGet     func(string) (string, error)
 	secretSet     func(string, string) error
 	secretDelete  func(string) error
+	profileCommit func(*sql.Tx) error
 }
 
 func NewApp() *App {
@@ -111,14 +121,14 @@ func (a *App) openStore() (*sql.DB, error) {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
-	if _, err = db.Exec("PRAGMA busy_timeout=5000; CREATE TABLE IF NOT EXISTS profiles(id TEXT PRIMARY KEY,metadata TEXT NOT NULL)"); err != nil {
+	if _, err = db.Exec("PRAGMA busy_timeout=5000; CREATE TABLE IF NOT EXISTS profiles(id TEXT PRIMARY KEY,metadata TEXT NOT NULL); CREATE TABLE IF NOT EXISTS profile_credentials(profile_id TEXT PRIMARY KEY,credential_id TEXT NOT NULL); CREATE TABLE IF NOT EXISTS credential_cleanup(id TEXT PRIMARY KEY)"); err != nil {
 		db.Close()
 		return nil, err
 	}
 	return db, nil
 }
 func (a *App) startup(ctx context.Context) {
-	a.ctx = ctx
+	a.ctx, a.appCancel = context.WithCancel(ctx)
 	dir, err := os.UserHomeDir()
 	if err != nil {
 		return
@@ -131,36 +141,103 @@ func (a *App) startup(ctx context.Context) {
 		return
 	}
 	defer db.Close()
-	rows, err := db.Query("SELECT metadata FROM profiles ORDER BY id")
+	rows, err := db.Query("SELECT p.metadata, COALESCE(c.credential_id,p.id) FROM profiles p LEFT JOIN profile_credentials c ON c.profile_id=p.id ORDER BY p.id")
 	if err != nil {
 		return
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var raw string
-		if rows.Scan(&raw) == nil {
+		var raw, credentialID string
+		if rows.Scan(&raw, &credentialID) == nil {
 			var p Profile
 			if json.Unmarshal([]byte(raw), &p) == nil {
+				p.credentialID = credentialID
 				a.profiles = append(a.profiles, p)
 			}
 		}
 	}
+	rows.Close()
+	if err := a.cleanupCredentials(db); err != nil {
+		log.Print("Unused credential cleanup remains pending; unlock the credential vault and restart Harbor to retry")
+	}
 
 }
-func (a *App) shutdown(context.Context) {
+
+var errShuttingDown = errors.New("Application is shutting down")
+
+// beginOperation registers synchronous disk/API work before shutdown can wait.
+func (a *App) beginOperation(ctx context.Context) (context.Context, func(), error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if a.closing {
+		return nil, nil, errShuttingDown
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	if a.operations == nil {
+		a.operations = make(map[string]context.CancelFunc)
+	}
+	operationID := id()
+	a.operations[operationID] = cancel
+	a.workers.Add(1)
+	return ctx, func() {
+		cancel()
+		a.mu.Lock()
+		delete(a.operations, operationID)
+		a.mu.Unlock()
+		a.workers.Done()
+	}, nil
+}
+
+func (a *App) beginShutdown() <-chan struct{} {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.shutdownDone != nil {
+		return a.shutdownDone
+	}
+	a.closing = true
+	if a.appCancel != nil {
+		a.appCancel()
+	}
+	a.shutdownDone = make(chan struct{})
+	for _, cancel := range a.operations {
+		cancel()
+	}
 	for _, t := range a.transfers {
 		if t.cancel != nil {
 			t.cancel()
+		} else if t.Status == "queued" {
+			t.Status = "cancelled"
 		}
-		_ = os.Remove(t.Path)
 	}
+	// No further Add is possible: admission and closing share a.mu.
+	go func() { a.workers.Wait(); close(a.shutdownDone) }()
+	return a.shutdownDone
+}
+
+func (a *App) shutdown(ctx context.Context) error {
+	done := a.beginShutdown()
+	select {
+	case <-done:
+	case <-ctx.Done():
+		// Never remove files while an operation might still be using them.
+		return ctx.Err()
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	var cleanupErr error
+	for _, t := range a.transfers {
+		if t.Path != "" {
+			if err := os.Remove(t.Path); err != nil && !os.IsNotExist(err) {
+				cleanupErr = errors.Join(cleanupErr, err)
+			}
+		}
+	}
+	return cleanupErr
 }
 func id() string { b := make([]byte, 16); _, _ = rand.Read(b); return hex.EncodeToString(b) }
 func (a *App) Profiles() []Profile {
-	a.mu.Lock()
-	defer a.mu.Unlock()
+	a.profileMu.Lock()
+	defer a.profileMu.Unlock()
 	return append([]Profile{}, a.profiles...)
 }
 func validate(p Profile) error {
@@ -175,75 +252,181 @@ func validate(p Profile) error {
 	}
 	return nil
 }
+
+// credentialCleanupError means the metadata operation committed successfully,
+// but unused vault entries remain queued for cleanup. No active keys are removed.
+type credentialCleanupError struct{ Operation string }
+
+func (e *credentialCleanupError) Error() string {
+	return "Connection " + e.Operation + "; unused credential cleanup is pending. Unlock the credential vault and restart Harbor to retry cleanup."
+}
+
+func credentialID(p Profile) string {
+	if p.credentialID != "" {
+		return p.credentialID
+	}
+	return p.ID // Legacy profiles used the profile ID as the vault key.
+}
+
+// cleanupCredentials never removes a reference still used by committed metadata.
+// The durable queue is written before staging credentials, so interrupted saves
+// and failed vault deletions can be recovered without storing any secrets in SQLite.
+func (a *App) cleanupCredentials(db *sql.DB) error {
+	rows, err := db.Query(`SELECT q.id FROM credential_cleanup q
+		WHERE NOT EXISTS (SELECT 1 FROM profile_credentials c WHERE c.credential_id=q.id)
+		AND NOT EXISTS (SELECT 1 FROM profiles p WHERE p.id=q.id
+		 AND NOT EXISTS (SELECT 1 FROM profile_credentials c WHERE c.profile_id=p.id))`)
+	if err != nil {
+		return err
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err = rows.Scan(&id); err != nil {
+			rows.Close()
+			return err
+		}
+		ids = append(ids, id)
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return err
+	}
+	var failures []error
+	for _, id := range ids {
+		if err = a.secretDelete(id); err != nil && !errors.Is(err, keyring.ErrNotFound) {
+			failures = append(failures, errors.New("Credential vault cleanup unavailable"))
+			continue
+		}
+		if _, err = db.Exec("DELETE FROM credential_cleanup WHERE id=?", id); err != nil {
+			failures = append(failures, err)
+		}
+	}
+	return errors.Join(failures...)
+}
+
+// RetryCredentialCleanup retries removal of unreferenced credentials only.
+func (a *App) RetryCredentialCleanup() error {
+	a.profileMu.Lock()
+	defer a.profileMu.Unlock()
+	db, err := a.openStore()
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	if err = a.cleanupCredentials(db); err != nil {
+		return &credentialCleanupError{Operation: "updated"}
+	}
+	return nil
+}
+
+func (a *App) commitProfile(tx *sql.Tx) error {
+	if a.profileCommit != nil {
+		return a.profileCommit(tx)
+	}
+	return tx.Commit()
+}
+
 func (a *App) SaveProfile(p Profile, secret Secret) (Profile, error) {
 	if err := validate(p); err != nil {
 		return Profile{}, err
 	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
+	a.profileMu.Lock()
+	defer a.profileMu.Unlock()
+	var previous Profile
+	for _, saved := range a.profiles {
+		if saved.ID == p.ID {
+			previous = saved
+			break
+		}
+	}
+	if p.ID != "" && previous.ID == "" {
+		return Profile{}, errors.New("Connection not found")
+	}
 	if p.ID == "" {
 		p.ID = id()
 	}
-	if secret.AccessKey != "" || secret.SecretKey != "" || secret.SessionToken != "" {
+	p.credentialID = credentialID(previous) // Never trust a caller's credential reference.
+	replace := secret.AccessKey != "" || secret.SecretKey != "" || secret.SessionToken != ""
+	var saved Secret
+	if previous.ID != "" && (!replace || secret.AccessKey == "" || secret.SecretKey == "") {
+		raw, err := a.secretGet(credentialID(previous))
+		if err != nil {
+			return Profile{}, fmt.Errorf("Credential vault: %w", err)
+		}
+		if err = json.Unmarshal([]byte(raw), &saved); err != nil {
+			return Profile{}, errors.New("Unable to read saved credentials")
+		}
+	}
+	if replace {
+		if secret.AccessKey == "" {
+			secret.AccessKey = saved.AccessKey
+		}
+		if secret.SecretKey == "" {
+			secret.SecretKey = saved.SecretKey
+		}
 		if secret.AccessKey == "" || secret.SecretKey == "" {
-			existing := false
-			for _, saved := range a.profiles {
-				if saved.ID == p.ID {
-					existing = true
-					break
-				}
-			}
-			if existing {
-				raw, err := a.secretGet(p.ID)
-				if err != nil {
-					return Profile{}, fmt.Errorf("Credential vault: %w", err)
-				}
-				var saved Secret
-				if err = json.Unmarshal([]byte(raw), &saved); err != nil {
-					return Profile{}, errors.New("Unable to read saved credentials")
-				}
-				if secret.AccessKey == "" {
-					secret.AccessKey = saved.AccessKey
-				}
-				if secret.SecretKey == "" {
-					secret.SecretKey = saved.SecretKey
-				}
-			}
-			if secret.AccessKey == "" || secret.SecretKey == "" {
-				return Profile{}, errors.New("Both access key and secret key are required for a new connection")
-			}
+			return Profile{}, errors.New("Both access key and secret key are required for a new connection")
 		}
-		b, _ := json.Marshal(secret)
-		if e := a.secretSet(p.ID, string(b)); e != nil {
-			return Profile{}, fmt.Errorf("Credential vault: %w", e)
-		}
-	} else {
-		if _, e := a.secretGet(p.ID); e != nil {
-			return Profile{}, errors.New("Enter credentials for this connection")
-		}
-	}
-	next := append([]Profile{}, a.profiles...)
-	found := false
-	for i := range next {
-		if next[i].ID == p.ID {
-			next[i] = p
-			found = true
-		}
-	}
-	if !found {
-		next = append(next, p)
+		p.credentialID = id()
+	} else if previous.ID == "" || saved.AccessKey == "" || saved.SecretKey == "" {
+		return Profile{}, errors.New("Enter credentials for this connection")
 	}
 	db, err := a.openStore()
 	if err != nil {
 		return Profile{}, err
 	}
 	defer db.Close()
-	b, _ := json.Marshal(p)
-	if _, err = db.Exec("INSERT INTO profiles(id,metadata) VALUES(?,?) ON CONFLICT(id) DO UPDATE SET metadata=excluded.metadata", p.ID, string(b)); err != nil {
+	// Write-ahead cleanup intent survives a crash before or during vault staging.
+	if replace {
+		if _, err = db.Exec("INSERT INTO credential_cleanup(id) VALUES(?)", p.credentialID); err != nil {
+			return Profile{}, err
+		}
+	}
+	tx, err := db.Begin()
+	if err != nil {
 		return Profile{}, err
 	}
-
-	a.profiles = next
+	defer tx.Rollback()
+	b, _ := json.Marshal(p)
+	if _, err = tx.Exec("INSERT INTO profiles(id,metadata) VALUES(?,?) ON CONFLICT(id) DO UPDATE SET metadata=excluded.metadata", p.ID, string(b)); err == nil {
+		_, err = tx.Exec("INSERT INTO profile_credentials(profile_id,credential_id) VALUES(?,?) ON CONFLICT(profile_id) DO UPDATE SET credential_id=excluded.credential_id", p.ID, p.credentialID)
+	}
+	if err == nil && replace && previous.ID != "" {
+		_, err = tx.Exec("INSERT OR IGNORE INTO credential_cleanup(id) VALUES(?)", credentialID(previous))
+	}
+	if err == nil && replace {
+		b, _ = json.Marshal(secret)
+		err = a.secretSet(p.credentialID, string(b))
+		if err != nil {
+			err = fmt.Errorf("Credential vault: %w", err)
+		}
+	}
+	if err == nil {
+		err = a.commitProfile(tx)
+	}
+	if err != nil {
+		tx.Rollback()
+		if cleanupErr := a.cleanupCredentials(db); cleanupErr != nil {
+			return Profile{}, fmt.Errorf("Connection was not saved; existing credentials are unchanged. Unused credential cleanup is pending: %w", err)
+		}
+		return Profile{}, err
+	}
+	found := false
+	for i := range a.profiles {
+		if a.profiles[i].ID == p.ID {
+			a.profiles[i] = p
+			found = true
+			break
+		}
+	}
+	if !found {
+		a.profiles = append(a.profiles, p)
+	}
+	if err = a.cleanupCredentials(db); err != nil {
+		return p, &credentialCleanupError{Operation: "saved"}
+	}
 	return p, nil
 }
 
@@ -265,18 +448,19 @@ func (t httpsOnlyTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 }
 
 func (a *App) client(ctx context.Context, profileID string) (*s3.Client, error) {
-	a.mu.Lock()
+	a.profileMu.Lock()
 	var p Profile
 	for _, v := range a.profiles {
 		if v.ID == profileID {
 			p = v
 		}
 	}
-	a.mu.Unlock()
 	if p.ID == "" {
+		a.profileMu.Unlock()
 		return nil, errors.New("Connection not found")
 	}
-	raw, err := a.secretGet(p.ID)
+	raw, err := a.secretGet(credentialID(p))
+	a.profileMu.Unlock()
 	if err != nil {
 		return nil, fmt.Errorf("Credential vault: %w", err)
 	}
@@ -309,6 +493,8 @@ func (a *App) client(ctx context.Context, profileID string) (*s3.Client, error) 
 		return nil, e
 	}
 	return s3.NewFromConfig(cfg, func(o *s3.Options) {
+		// Custom endpoints come only from the saved Harbor connection, never ambient AWS configuration.
+		o.BaseEndpoint = nil
 		o.UsePathStyle = p.PathStyle
 		if p.Endpoint != "" {
 			o.BaseEndpoint = aws.String(p.Endpoint)
@@ -393,18 +579,30 @@ func (a *App) QueueDownload(profile, bucket, key string, target ...downloadTarge
 	if e = os.MkdirAll(dir, 0700); e != nil {
 		return "", e
 	}
-	return a.queue("download", profile, bucket, key, filepath.Join(dir, "download-"+id()), target...), nil
+	transferID := a.queue("download", profile, bucket, key, filepath.Join(dir, "download-"+id()), target...)
+	if transferID == "" {
+		return "", errShuttingDown
+	}
+	return transferID, nil
 }
 func (a *App) queue(direction, profile, bucket, key, path string, target ...downloadTarget) string {
-	t := &Transfer{ID: id(), Direction: direction, ProfileID: profile, Bucket: bucket, Key: key, Path: path, Status: "queued", CreatedAt: time.Now()}
+	t := &Transfer{attempt: 1, ID: id(), Direction: direction, ProfileID: profile, Bucket: bucket, Key: key, Path: path, Status: "queued", CreatedAt: time.Now()}
 	if len(target) > 0 {
 		t.destination = &target[0]
 	}
 	a.mu.Lock()
+	if a.closing {
+		a.mu.Unlock()
+		return ""
+	}
 	a.transfers[t.ID] = t
 	a.transferOrder = append(a.transferOrder, t.ID)
+	a.workers.Add(1)
 	a.mu.Unlock()
-	go a.run(t.ID)
+	go func() {
+		defer a.workers.Done()
+		a.run(t.ID, 1)
+	}()
 	return t.ID
 }
 func (a *App) Transfers() []Transfer {
@@ -431,16 +629,26 @@ func (a *App) CancelTransfer(id string) {
 }
 func (a *App) RetryTransfer(id string) error {
 	a.mu.Lock()
+	if a.closing {
+		a.mu.Unlock()
+		return errors.New("Application is shutting down")
+	}
 	t := a.transfers[id]
 	if t == nil || (t.Status != "failed" && t.Status != "cancelled") {
 		a.mu.Unlock()
 		return errors.New("Only failed or cancelled transfers can be retried")
 	}
+	t.attempt++
+	attempt := t.attempt
 	t.Status = "queued"
 	t.Done = 0
 	t.Error = ""
+	a.workers.Add(1)
 	a.mu.Unlock()
-	go a.run(id)
+	go func() {
+		defer a.workers.Done()
+		a.run(id, attempt)
+	}()
 	return nil
 }
 
@@ -454,12 +662,13 @@ func (p *progressReader) Read(b []byte) (int, error) {
 	p.update(int64(n))
 	return n, e
 }
-func (a *App) run(id string) {
+func (a *App) run(id string, attempt uint64) {
 	ctx, cancel := context.WithCancel(a.ctx)
 	defer cancel()
 	a.mu.Lock()
 	t := a.transfers[id]
-	if t.Status == "cancelled" {
+	// A delayed worker from a cancelled queue entry must not claim its retry.
+	if t == nil || t.attempt != attempt || t.Status != "queued" {
 		a.mu.Unlock()
 		return
 	}
@@ -470,6 +679,9 @@ func (a *App) run(id string) {
 	err := a.execute(ctx, spec)
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if a.transfers[id] != t || t.attempt != attempt {
+		return
+	}
 	t.cancel = nil
 	if err != nil {
 		t.Status = "failed"
@@ -496,8 +708,20 @@ func (a *App) execute(ctx context.Context, t Transfer) error {
 	if e != nil {
 		return e
 	}
-	update := func(n int64) { a.mu.Lock(); a.transfers[t.ID].Done += n; a.mu.Unlock() }
-	total := func(n int64) { a.mu.Lock(); a.transfers[t.ID].Total = n; a.mu.Unlock() }
+	update := func(n int64) {
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		if current := a.transfers[t.ID]; current != nil && current.attempt == t.attempt && current.Status == "running" {
+			current.Done += n
+		}
+	}
+	total := func(n int64) {
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		if current := a.transfers[t.ID]; current != nil && current.attempt == t.attempt && current.Status == "running" {
+			current.Total = n
+		}
+	}
 	if t.Direction == "upload" {
 		f, e := os.Open(t.Path)
 		if e != nil {
@@ -610,8 +834,8 @@ func (a *App) DeleteFile(profile, bucket, key, etag string) (string, error) {
 
 // DeleteProfile removes only local metadata and vault credentials, never remote objects.
 func (a *App) DeleteProfile(profileID string) error {
-	a.mu.Lock()
-	defer a.mu.Unlock()
+	a.profileMu.Lock()
+	defer a.profileMu.Unlock()
 	index := -1
 	for i, p := range a.profiles {
 		if p.ID == profileID {
@@ -622,11 +846,14 @@ func (a *App) DeleteProfile(profileID string) error {
 	if index < 0 {
 		return errors.New("Connection not found")
 	}
+	a.mu.Lock()
 	for _, t := range a.transfers {
 		if t.ProfileID == profileID && (t.Status == "running" || t.Status == "queued") {
+			a.mu.Unlock()
 			return errors.New("Wait for this connection’s transfers to finish or cancel them before deleting it")
 		}
 	}
+	a.mu.Unlock()
 	db, err := a.openStore()
 	if err != nil {
 		return err
@@ -640,22 +867,20 @@ func (a *App) DeleteProfile(profileID string) error {
 	if _, err = tx.Exec("DELETE FROM profiles WHERE id=?", profileID); err != nil {
 		return err
 	}
-	raw, readErr := a.secretGet(profileID)
-	if readErr != nil && !errors.Is(readErr, keyring.ErrNotFound) {
-		return fmt.Errorf("Credential vault: %w", readErr)
+	ref := credentialID(a.profiles[index])
+	if _, err = tx.Exec("DELETE FROM profile_credentials WHERE profile_id=?", profileID); err != nil {
+		return err
 	}
-	if err = a.secretDelete(profileID); err != nil && !errors.Is(err, keyring.ErrNotFound) {
-		return fmt.Errorf("Credential vault: %w", err)
+	if _, err = tx.Exec("INSERT OR IGNORE INTO credential_cleanup(id) VALUES(?)", ref); err != nil {
+		return err
 	}
-	if err = tx.Commit(); err != nil {
-		if readErr == nil {
-			if restoreErr := a.secretSet(profileID, raw); restoreErr != nil {
-				return errors.New("Connection deletion failed and credentials could not be restored; re-enter credentials")
-			}
-		}
+	if err = a.commitProfile(tx); err != nil {
 		return err
 	}
 	a.profiles = append(a.profiles[:index], a.profiles[index+1:]...)
+	if err = a.cleanupCredentials(db); err != nil {
+		return &credentialCleanupError{Operation: "deleted"}
+	}
 	return nil
 }
 

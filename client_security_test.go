@@ -9,6 +9,7 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"errors"
+	"io"
 	"math/big"
 	"net"
 	"net/http"
@@ -172,7 +173,7 @@ func TestS3HTTPSRejectsRedirects(t *testing.T) {
 }
 
 func TestS3HTTPSRejectsPlaintextEndpoints(t *testing.T) {
-	for _, setting := range []string{"profile", "AWS_ENDPOINT_URL", "AWS_ENDPOINT_URL_S3"} {
+	for _, setting := range []string{"profile"} {
 		t.Run(setting, func(t *testing.T) {
 			var requests atomic.Int32
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -205,7 +206,7 @@ func TestS3HTTPSRejectsPlaintextEndpoints(t *testing.T) {
 }
 
 func TestS3HTTPSAllowsSignedRequestsWithCustomCA(t *testing.T) {
-	for _, setting := range []string{"profile", "AWS_ENDPOINT_URL", "AWS_ENDPOINT_URL_S3"} {
+	for _, setting := range []string{"profile"} {
 		t.Run(setting, func(t *testing.T) {
 			var requests atomic.Int32
 			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -235,5 +236,68 @@ func TestS3HTTPSAllowsSignedRequestsWithCustomCA(t *testing.T) {
 				t.Fatalf("unexpected HTTPS bucket result: requests=%d buckets=%v", requests.Load(), out.Buckets)
 			}
 		})
+	}
+}
+
+// Returning a synthetic HTTP response observes final endpoint resolution and
+// signing without making any network connection, including to public AWS.
+type endpointRecordingClient struct{ request *http.Request }
+
+func (c *endpointRecordingClient) Do(r *http.Request) (*http.Response, error) {
+	c.request = r
+	return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"application/xml"}}, Body: io.NopCloser(strings.NewReader(securityFixtureBuckets)), Request: r}, nil
+}
+
+func TestS3IgnoresAmbientCustomEndpoints(t *testing.T) {
+	for _, scheme := range []string{"http", "https"} {
+		for _, setting := range []string{"AWS_ENDPOINT_URL", "AWS_ENDPOINT_URL_S3", "shared-global", "shared-s3"} {
+			for _, explicit := range []bool{false, true} {
+				name := scheme + "/" + setting
+				if explicit {
+					name += "/explicit-profile"
+				} else {
+					name += "/aws-default"
+				}
+				t.Run(name, func(t *testing.T) {
+					a := securityFixtureApp(t, "")
+					ambient := scheme + "://127.0.0.1:1/ambient"
+					switch setting {
+					case "shared-global", "shared-s3":
+						contents := "[default]\nendpoint_url = " + ambient + "\n"
+						if setting == "shared-s3" {
+							contents = "[default]\nservices = fixture\n[services fixture]\ns3 =\n  endpoint_url = " + ambient + "\n"
+						}
+						if err := os.WriteFile(os.Getenv("AWS_CONFIG_FILE"), []byte(contents), 0600); err != nil {
+							t.Fatal(err)
+						}
+					default:
+						t.Setenv(setting, ambient)
+					}
+					if explicit {
+						a.profiles[0].Endpoint = "https://127.0.0.1:2/explicit"
+					}
+					c := securityFixtureClient(t, a)
+					if got := aws.ToString(c.Options().BaseEndpoint); got != a.profiles[0].Endpoint {
+						t.Fatalf("ambient endpoint selected: %q", got)
+					}
+					recorder := &endpointRecordingClient{}
+					_, err := c.ListBuckets(context.Background(), &s3.ListBucketsInput{}, func(o *s3.Options) { o.HTTPClient = recorder })
+					if err != nil {
+						t.Fatal(err)
+					}
+					if recorder.request == nil {
+						t.Fatal("request not observed")
+					}
+					wantHost := "s3.us-east-1.amazonaws.com"
+					if explicit {
+						wantHost = "127.0.0.1:2"
+					}
+					if recorder.request.URL.Scheme != "https" || recorder.request.URL.Host != wantHost {
+						t.Fatalf("unexpected signed destination: %s", recorder.request.URL)
+					}
+					assertSecurityFixtureSignature(t, recorder.request)
+				})
+			}
+		}
 	}
 }
