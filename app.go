@@ -111,7 +111,7 @@ func (a *App) startup(ctx context.Context) {
 		return
 	}
 	if a.configFile == "" {
-		a.configFile = filepath.Join(dir, ".s3-browser", "profiles.db")
+		a.configFile = filepath.Join(dir, ".harbor", "profiles.db")
 	}
 	db, err := a.openStore()
 	if err != nil {

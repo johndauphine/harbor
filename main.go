@@ -23,7 +23,7 @@ var assets embed.FS
 
 func main() {
 	port := flag.Int("port", 0, "Local port (0 chooses an available port)")
-	dbPath := flag.String("db", "", "SQLite path (default: ~/.s3-browser/profiles.db)")
+	dbPath := flag.String("db", "", "SQLite path (default: ~/.harbor/profiles.db)")
 	flag.Parse()
 	listener, err := net.Listen("tcp4", fmt.Sprintf("127.0.0.1:%d", *port))
 	if err != nil {
