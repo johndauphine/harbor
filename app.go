@@ -146,6 +146,9 @@ func (a *App) startup(ctx context.Context) (startupErr error) {
 		return fmt.Errorf("Open configuration database: %w", err)
 	}
 	defer db.Close()
+	if err = a.bindStoreLocation(db); err != nil {
+		return err
+	}
 	rows, err := db.Query("SELECT p.id, p.metadata, COALESCE(c.credential_id,p.id) FROM profiles p LEFT JOIN profile_credentials c ON c.profile_id=p.id ORDER BY p.id")
 	if err != nil {
 		return fmt.Errorf("Read saved connections: %w", err)

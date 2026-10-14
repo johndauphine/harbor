@@ -160,9 +160,13 @@ func TestUpgradeMetadataBackupDoesNotRestoreRotatedCredentials(t *testing.T) {
 	if _, err = a.SaveProfile(p, Secret{AccessKey: "rotated-access", SecretKey: "rotated-secret"}); err != nil {
 		t.Fatal(err)
 	}
-	// Restore only configuration bytes into a stopped, isolated fixture instance.
+	// Restore only configuration bytes at the bound original path after stopping
+	// the isolated fixture. Copying to a different path is deliberately rejected.
 	restored := NewApp()
-	restored.configFile = filepath.Join(t.TempDir(), "restored.db")
+	if err = a.shutdown(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	restored.configFile = a.configFile
 	restored.secretGet = a.secretGet
 	restored.secretSet = a.secretSet
 	restored.secretDelete = a.secretDelete

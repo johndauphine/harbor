@@ -29,20 +29,46 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.13'
+      - run: python -m unittest discover -s scripts -p "test_*.py"
       - run: go mod verify
       - run: go test -race -timeout 5m ./...
       - run: go vet ./...
+      - name: Multi-GiB transfer integrity
+        shell: bash
+        env:
+          HARBOR_GIB_TEST: '1'
+        run: |
+          python -c "import shutil,tempfile; assert shutil.disk_usage(tempfile.gettempdir()).free >= 8 * 1024**3, 'Multi-GiB test requires at least 8 GiB free temporary disk space'"
+          go test -run '^TestStreamingMultiGiBTransfers$' -count=1 -timeout 10m ./...
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        if: runner.os == 'Linux'
+        if: runner.os != 'macOS'
         with:
           node-version: '24'
       - name: Frontend and native browser regressions
-        if: runner.os == 'Linux'
+        if: runner.os != 'macOS'
         shell: bash
         run: |
-          export HARBOR_TEST_CHROMIUM="$(command -v google-chrome)"
-          test -x "$HARBOR_TEST_CHROMIUM"
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            HARBOR_TEST_CHROMIUM="$(python -c "import os,pathlib,sys; roots=[os.environ.get('PROGRAMFILES',''),os.environ.get('PROGRAMFILES(X86)','')]; paths=[pathlib.Path(root)/part for root in roots if root for part in ['Google/Chrome/Application/chrome.exe','Microsoft/Edge/Application/msedge.exe']]; found=next((path for path in paths if path.is_file()),None); assert found, 'Chrome or Edge is required for native Windows browser regression coverage'; sys.stdout.write(str(found))")"
+          else
+            HARBOR_TEST_CHROMIUM="$(command -v google-chrome)"
+            test -x "$HARBOR_TEST_CHROMIUM"
+          fi
+          export HARBOR_TEST_CHROMIUM
           node --test tests/*.test.cjs
+
+      - name: Native archive extraction and isolated startup
+        if: runner.os != 'Linux'
+        shell: bash
+        run: |
+          harbor_target="$(go env GOOS)/$(go env GOARCH)"
+          python scripts/package_release.py --version "development-${GITHUB_SHA::12}" --target "$harbor_target" --output dist/native
+          harbor_suffix=zip
+          if [[ "$RUNNER_OS" == "macOS" ]]; then harbor_suffix=tar.gz; fi
+          python scripts/check_archive.py "dist/native/harbor-development-${GITHUB_SHA::12}-${harbor_target/\//-}.$harbor_suffix"
 
   vulnerabilities:
     runs-on: ubuntu-latest
@@ -82,22 +108,19 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-      - name: Build standalone executables and checksums
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.13'
+      - name: Build versioned unsigned archives and checksums
         shell: bash
-        env:
-          CGO_ENABLED: '0'
-        run: |
-          mkdir -p dist
-          GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags "-X main.version=development-${GITHUB_SHA::12}" -o dist/harbor-macos-arm64 .
-          GOOS=windows GOARCH=arm64 go build -trimpath -ldflags "-X main.version=development-${GITHUB_SHA::12}" -o dist/harbor-windows-arm64.exe .
-          GOOS=windows GOARCH=amd64 go build -trimpath -ldflags "-X main.version=development-${GITHUB_SHA::12}" -o dist/harbor-windows-amd64.exe .
-          (cd dist && sha256sum harbor-* > SHA256SUMS)
+        run: python scripts/package_release.py --version "development-${GITHUB_SHA::12}" --output dist
       - name: Describe artifact trust status
         shell: bash
         run: |
           cat >> "$GITHUB_STEP_SUMMARY" <<'SUMMARY'
           ### Development artifacts
-          These executables are unsigned CI builds, not a published or trusted release.
+          These versioned archives contain unsigned CI builds, not a published or trusted release.
+          The macOS tar archive preserves executable permissions; Windows builds use ZIP.
           SHA256SUMS detects file changes; it does not establish publisher identity.
           macOS public distribution still needs a valid Developer ID Application identity,
           hardened-runtime signing and Apple notarization using the owner's developer account.
