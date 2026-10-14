@@ -168,3 +168,48 @@ func TestDownloadCancelRetryAndUpload(t *testing.T) {
 		t.Fatal("upload not received")
 	}
 }
+
+func TestCreateFolderMarker(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		if r.Method != "PUT" || r.URL.Path != "/bucket/parent/New folder/" {
+			t.Errorf("unexpected folder request: %s %s", r.Method, r.URL.Path)
+		}
+		if r.Header.Get("If-None-Match") != "*" {
+			t.Error("missing overwrite protection")
+		}
+		data, _ := io.ReadAll(r.Body)
+		if len(data) != 0 {
+			t.Error("folder marker is not empty")
+		}
+		if requests.Load() > 1 {
+			w.WriteHeader(http.StatusPreconditionFailed)
+			return
+		}
+	}))
+	defer server.Close()
+	a := NewApp()
+	a.ctx = context.Background()
+	a.profiles = []Profile{{ID: "fixture", Name: "Fixture", Region: "us-east-1", Endpoint: server.URL, PathStyle: true}}
+	raw, _ := json.Marshal(Secret{AccessKey: "fixture", SecretKey: "fixture"})
+	a.secretGet = func(string) (string, error) { return string(raw), nil }
+	ca := filepath.Join(t.TempDir(), "ca.pem")
+	os.WriteFile(ca, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: server.Certificate().Raw}), 0600)
+	a.profiles[0].CAFile = ca
+	key, err := a.CreateFolder("fixture", "bucket", "parent/", "New folder")
+	if err != nil || key != "parent/New folder/" {
+		t.Fatalf("folder creation: %q %v", key, err)
+	}
+	if _, err = a.CreateFolder("fixture", "bucket", "parent/", "New folder"); err == nil {
+		t.Fatal("existing marker was overwritten")
+	}
+	for _, name := range []string{"", " ", "..", "nested/folder", "bad\\name", "bad\nname"} {
+		if _, err = a.CreateFolder("fixture", "bucket", "parent/", name); err == nil {
+			t.Errorf("accepted invalid name %q", name)
+		}
+	}
+	if requests.Load() != 2 {
+		t.Fatalf("invalid inputs caused requests: %d", requests.Load())
+	}
+}

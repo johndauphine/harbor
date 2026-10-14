@@ -465,3 +465,32 @@ func (a *App) execute(ctx context.Context, t Transfer) error {
 	}
 	return os.Rename(tmp, t.Path)
 }
+
+// CreateFolder writes an S3 folder marker without replacing an existing object.
+func (a *App) CreateFolder(profile, bucket, prefix, name string) (string, error) {
+	name = strings.TrimSpace(name)
+	if bucket == "" {
+		return "", errors.New("Choose a bucket first")
+	}
+	if name == "" || name == "." || name == ".." || strings.ContainsAny(name, "/\\") || strings.ContainsAny(name, "\r\n\t") {
+		return "", errors.New("Enter a folder name without slashes or control characters")
+	}
+	if prefix != "" && !strings.HasSuffix(prefix, "/") {
+		return "", errors.New("The current folder path must end with a slash")
+	}
+	key := prefix + name + "/"
+	if len(key) > 1024 {
+		return "", errors.New("Folder path is too long")
+	}
+	ctx, cancel := context.WithTimeout(a.ctx, 30*time.Second)
+	defer cancel()
+	c, err := a.client(ctx, profile)
+	if err != nil {
+		return "", err
+	}
+	_, err = c.PutObject(ctx, &s3.PutObjectInput{Bucket: aws.String(bucket), Key: aws.String(key), Body: strings.NewReader(""), ContentLength: aws.Int64(0), IfNoneMatch: aws.String("*")})
+	if err != nil {
+		return "", fmt.Errorf("Could not create folder (it may already exist): %w", err)
+	}
+	return key, nil
+}

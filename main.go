@@ -176,6 +176,8 @@ func webHandler(a *App, host, token string) http.Handler {
 			value, err = a.TestConnection(in.ProfileID)
 		case "/api/buckets":
 			value, err = a.Buckets(in.ProfileID)
+		case "/api/create-folder":
+			value, err = a.CreateFolder(in.ProfileID, in.Bucket, in.Prefix, in.Key)
 		case "/api/browse":
 			value, err = a.Browse(in.ProfileID, in.Bucket, in.Prefix, in.Token)
 		case "/api/download":
