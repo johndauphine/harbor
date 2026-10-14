@@ -1,18 +1,18 @@
 # Harbor S3 Browser
 
-Work in progress: a Go executable serving an embedded browser UI on loopback only.
+Harbor is a standalone Go executable serving an embedded S3 browser on loopback only. The current target is reliable general-purpose use on macOS Apple Silicon and Windows ARM64/x64.
 
-Current source includes saved connection profiles with OS credential vault storage, S3 bucket and prefix browsing, pagination, and background transfers. Browser uploads now stage files locally and support background progress, cancellation, and retry. Downloads also run in the background with progress, cancellation, and retry. Download opens Save As first and saves automatically to the selected destination. This is an early test build; do not use production or federal data.
+Current source includes saved connection profiles with OS credential vault storage, S3 bucket and prefix browsing, pagination, and background transfers. Browser uploads now stage files locally and support background progress, cancellation, and retry. Downloads also run in the background with progress, cancellation, and retry. Download opens Save As first and saves automatically to the selected destination. This is a pre-release build. Keep backups and verify behavior with disposable files before using important data. It has not been assessed for regulated federal use.
 
 ## Development
 
-Requires Go 1.26 or newer. Run `go test ./...` then `go run .`. Open the session URL printed by the program and keep it private. Stop with Ctrl+C. Source has no dependency on Node, Wails, WebView2, or a separate server.
+Requires Go 1.26.9 or newer; use the patched version recorded in `go.mod`. Run `go test ./...` then `go run .`. Open the session URL printed by the program and keep it private. Stop with Ctrl+C. Source has no dependency on Node, Wails, WebView2, or a separate server.
 
 Build: `go build -o harbor .`. Cross-build Windows with `GOOS=windows GOARCH=arm64 go build -o harbor.exe .` (or `amd64`).
 
 ## Verification
 
-`go test -race ./...` and `go vet ./...` pass. Regression coverage includes local TLS transfers, cancel/retry attempt isolation, shutdown draining and timeout behavior, credential save failures and interrupted-save recovery, private credential references, browser request boundaries, and endpoint/redirect protections. `node --test tests/*.test.cjs` passes 39 checks, including native Chromium form activation and connection cleanup warnings.
+`go test -race ./...` and `go vet ./...` pass. Regression coverage includes local TLS transfers, cancel/retry attempt isolation, shutdown draining and timeout behavior, credential save failures and interrupted-save recovery, private credential references, browser request boundaries, and endpoint/redirect protections. `node --test tests/*.test.cjs` passes 42 checks, including native Chromium form activation and connection cleanup warnings.
 
 The preceding build passed live Edge checks in Windows 11 ARM under Parallels for both ARM64 and emulated AMD64 executables, with byte-identical uploads/downloads using isolated HTTPS fixtures. The latest Go regression suite also passed inside that VM for ARM64 and emulated AMD64, including credential consistency, cancellation/retry, shutdown, and process locking. Opt-in tests requiring the separate live MinIO server were skipped; the suite used synthetic local fixtures. These checks do not establish native x64 coverage, and the latest backend revision has not repeated the full interactive browser checklist.
 
@@ -21,8 +21,8 @@ The preceding build passed live Edge checks in Windows 11 ARM under Parallels fo
 - Upload staging is limited to 5 GiB and uses disk space; failed/cancelled upload files remain available for retry in the user cache until normal shutdown. Successful uploads remove their staging file.
 - Cached downloads are removed on normal shutdown, but abrupt termination can leave cache files.
 - The executable enforces one process per profile database using an OS-backed lock. Close older Harbor binaries before upgrading because they do not honor this lock. Use a trusted local filesystem; network-share locking is not verified, and hard-linked configuration databases are rejected.
-- Autocomplete still considers a limited listing page; a shared prefix may not represent every matching object.
-- FIPS build/configuration validation, signed releases, security audit logging, and formal deployment assessment remain pending.
+- Autocomplete loads matches in pages. Tab only infers a shared or unique completion once the matching pages are complete; explicitly highlighting a result still works immediately.
+- Public artifacts are unsigned until publisher signing is configured. Mac notarization and Windows publisher signing are not yet complete. No automatic self-update is implemented.
 - Do not infer FedRAMP compliance from these application-level safeguards.
 
 ## Security scope
@@ -71,10 +71,14 @@ Cancel/retry uses an identity per attempt. An old queued worker cannot claim a n
 
 Shutdown closes admission, cancels active transfers and tracked API/file operations, waits for them to stop, and only then removes cached transfer files. Normal command-line shutdown handles interruption and termination signals. The server allows five seconds for request draining, then up to twenty-five seconds for remaining work; an incomplete drain reports an error and preserves potentially active files instead of racing their removal. An abrupt exit or timed-out shutdown may therefore leave local data requiring controlled cleanup.
 
-## Regulated-data release gate
+## General-use release status
 
-Development and regression tests use synthetic data. The target is strict application safeguards, not a claim that a home workstation or this executable is authorized for federal information. Do not introduce regulated federal data until the responsible organization approves the client, workstation, storage destination, and data flow within its system boundary.
+The current release work targets ordinary S3 browsing and file transfers, not FedRAMP certification. Read [UPGRADE.md](UPGRADE.md) before replacing an older build and [RELEASE.md](RELEASE.md) for build, verification, and signing instructions. `harbor --version` prints build and toolchain information without opening settings or credentials.
 
-Before such use, the unresolved engineering and deployment work includes validated cryptographic build/runtime settings; dependency and vulnerability review; release integrity/signing; audit requirements; cache, download, backup, and crash-retention controls; endpoint/proxy trust; least-privilege credentials; and verification of the target filesystem and workstation configuration. The current tests do not establish these controls. The loopback browser session also relies on the security of the signed-in OS account and browser.
+Go 1.26.9 replaces the earlier vulnerable toolchain. A source vulnerability scan with govulncheck 1.3.0 reported no known advisories for the three shipped targets at the time of the audit; this is not a guarantee against unknown vulnerabilities. CI repeats dependency integrity checks, tests, vulnerability scans, and builds with checksums. CI artifacts are development builds, not automatically published releases.
 
-FedRAMP distinguishes [cloud-service scope](https://www.fedramp.gov/2026/scope/) from [agency responsibility for using the service within its system](https://www.fedramp.gov/2026/agencies/use/). This local client requires assessment in that deployment context; fixing bugs does not confer authorization.
+Synthetic local HTTPS tests cover approximately 13 MB multipart uploads and 12 MB downloads with dropped connections, truncated responses, cancellation, manual retry, and automatic upload-part retry. Successful results are compared byte for byte. Interrupted downloads preserve an existing destination. Multipart cancellation attempts remote cleanup with a separate five-second deadline; if cleanup fails, Harbor reports that incomplete parts may remain. Bucket lifecycle rules for incomplete multipart uploads provide additional protection after crashes or network loss.
+
+Remaining release work includes signed distribution and notarization, validation of the hosted CI workflow, and broader real-world testing. Multi-gigabyte transfers, arbitrary storage-provider behavior, native Windows ARM installation/signing, and operating-system credential-vault recovery are not covered by the local synthetic suite. The previous build passed interactive Safari and Windows Edge checks; the latest revision has not repeated that complete manual checklist.
+
+Regulated federal use remains outside the current release target. This app does not confer FedRAMP authorization or establish workstation, cryptographic-validation, audit, or organizational controls.

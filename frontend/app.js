@@ -203,19 +203,19 @@ $('object-search-form').onsubmit=async e=>{e.preventDefault();if(!bucket){messag
 $('clear-search').onclick=action(async()=>{objectFilter='';$('object-search').value='';if(bucket)await browse()});
 
 // Query storage, rather than only the loaded table, for path completion.
-var pathTimer, pathRequest=0, pathMatches=[], pathActive=-1;
-function closePathSuggestions(){clearTimeout(pathTimer);pathRequest++;pathMatches=[];pathActive=-1;$('path-suggestions').hidden=true;$('path').setAttribute('aria-expanded','false');$('path').setAttribute('aria-activedescendant','')}
+var pathTimer, pathRequest=0, pathMatches=[], pathActive=-1, pathHasMore=false;
+function closePathSuggestions(){clearTimeout(pathTimer);pathRequest++;pathMatches=[];pathActive=-1;pathHasMore=false;$('path-suggestions').hidden=true;$('path').setAttribute('aria-expanded','false');$('path').setAttribute('aria-activedescendant','')}
 async function suggestPaths(token='',append=false){
  const input=$('path').value,target={ProfileID:profile,Bucket:bucket,Prefix:input},request=++pathRequest;
  if(!bucket){closePathSuggestions();return}
  try{
   const page=await api('browse',{...target,Token:token});
   if(request!==pathRequest||input!==$('path').value||target.ProfileID!==profile||target.Bucket!==bucket)return;
-  pathMatches=(append?pathMatches:[]).concat(page.Objects.filter(o=>o.Key.startsWith(input)));pathActive=-1;
+  pathMatches=(append?pathMatches:[]).concat(page.Objects.filter(o=>o.Key.startsWith(input)));pathActive=-1;pathHasMore=!!page.Next;
   const rows=pathMatches.map((o,i)=>{const row=button(o.Key,()=>{if(request!==pathRequest||input!==$('path').value||target.ProfileID!==profile||target.Bucket!==bucket)return;return choosePath(o,true)});row.id='path-option-'+i;row.setAttribute('role','option');row.setAttribute('aria-selected','false');row.onmousedown=e=>e.preventDefault();return row});
   $('path-suggestions').replaceChildren(...rows);
   if(page.Next){const more=button('Load more matches',()=>{if(request!==pathRequest||input!==$('path').value||target.ProfileID!==profile||target.Bucket!==bucket)return;return suggestPaths(page.Next,true)});more.onmousedown=e=>e.preventDefault();$('path-suggestions').append(more)}
-  if(!rows.length)$('path-suggestions').textContent='No matching folders or files.';
+  if(!rows.length&&!page.Next)$('path-suggestions').textContent='No matching folders or files.';
   $('path-suggestions').hidden=false;$('path').setAttribute('aria-expanded','true');$('path').setAttribute('aria-activedescendant','');
  }catch(e){if(request===pathRequest){closePathSuggestions();message('Unable to suggest paths: '+e.message)}}
 }
@@ -238,7 +238,9 @@ $('path').onkeydown=e=>{
  }
  if(e.key==='Tab'&&pathMatches.length){
   e.preventDefault();
-  if(pathActive>=0||pathMatches.length===1){choosePath(pathMatches[pathActive>=0?pathActive:0]);return}
+  if(pathActive>=0){choosePath(pathMatches[pathActive]);return}
+  if(pathHasMore){message('More matching names are available. Type more or load more matches before completing.');return}
+  if(pathMatches.length===1){choosePath(pathMatches[0]);return}
   let shared=pathMatches[0].Key;
   for(const match of pathMatches.slice(1)){while(!match.Key.startsWith(shared))shared=shared.slice(0,-1)}
   if(shared.length>$('path').value.length){$('path').value=shared;suggestPaths()}

@@ -1,6 +1,6 @@
 module github.com/johndauphine/s3-browser
 
-go 1.26.2
+go 1.26.9
 
 require (
 	github.com/aws/aws-sdk-go-v2 v1.47.3

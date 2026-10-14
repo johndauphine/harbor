@@ -145,3 +145,27 @@ test('credential masks are never submitted and typing replaces only the edited k
  h.get('connection-AccessKey').value='replacement';h.get('connection-AccessKey').oninput();assert.equal(h.context.credentialValue('AccessKey'),'replacement');assert.equal(h.context.credentialValue('SecretKey'),'');
  h.context.editConnection({ID:'one',Name:'One'});assert.equal(h.context.credentialValue('AccessKey'),'');
 });
+
+
+test('Tab does not infer a unique name or shared prefix from an incomplete suggestions page',async()=>{
+ for(const first of [[{Key:'report-final.txt'}],[{Key:'report-final-a.txt'},{Key:'report-final-b.txt'}]]){
+  const h=await setup();h.setResponder(async req=>req.Token?{Objects:[{Key:'report-draft.txt'}],Next:''}:{Objects:first,Next:'next-page'});
+  h.get('path').value='report-';await h.context.suggestPaths();
+  h.get('path').onkeydown({key:'Tab',preventDefault(){}});
+  assert.equal(h.get('path').value,'report-');assert.match(h.get('message').textContent,/More matching names/);
+  await h.get('path-suggestions').children.at(-1).click();
+  h.get('path').onkeydown({key:'Tab',preventDefault(){}});assert.equal(h.get('path').value,'report-');
+ }
+});
+test('explicitly highlighted completion still works with additional pages available',async()=>{
+ const h=await setup();h.setResponder(async()=>({Objects:[{Key:'report-final.txt'}],Next:'next-page'}));
+ h.get('path').value='report-';await h.context.suggestPaths();
+ h.get('path').onkeydown({key:'ArrowDown',preventDefault(){}});h.get('path').onkeydown({key:'Tab',preventDefault(){}});
+ assert.equal(h.get('path').value,'report-final.txt');
+});
+test('empty suggestion page with continuation retains Load more matches',async()=>{
+ const h=await setup();h.setResponder(async req=>req.Token?{Objects:[{Key:'report-final.txt'}],Next:''}:{Objects:[],Next:'next-page'});
+ h.get('path').value='report-';await h.context.suggestPaths();
+ const more=h.get('path-suggestions').children.at(-1);assert.equal(more.textContent,'Load more matches');await more.click();
+ assert.equal(h.get('path-suggestions').children[0].textContent,'report-final.txt');
+});

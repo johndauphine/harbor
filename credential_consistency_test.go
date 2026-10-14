@@ -43,7 +43,9 @@ func restartCredentialFixture(t *testing.T, a *App) *App {
 	b.secretGet = a.secretGet
 	b.secretSet = a.secretSet
 	b.secretDelete = a.secretDelete
-	b.startup(context.Background())
+	if err := b.startup(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 	return b
 }
 func TestCredentialSaveFailureKeepsCommittedPair(t *testing.T) {

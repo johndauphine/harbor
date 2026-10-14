@@ -24,9 +24,14 @@ import (
 var assets embed.FS
 
 func main() {
+	showVersion := flag.Bool("version", false, "Print build information and exit")
 	port := flag.Int("port", 0, "Local port (0 chooses an available port)")
 	dbPath := flag.String("db", "", "SQLite path (default: ~/.harbor/profiles.db)")
 	flag.Parse()
+	if *showVersion {
+		fmt.Println(versionText())
+		return
+	}
 	store, err := acquireStoreLock(*dbPath)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -40,7 +45,11 @@ func main() {
 	}
 	app := NewApp()
 	app.configFile = store.path
-	app.startup(context.Background())
+	if err = app.startup(context.Background()); err != nil {
+		listener.Close()
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
 	tokenBytes := make([]byte, 32)
 	if _, err = rand.Read(tokenBytes); err != nil {
 		panic(err)

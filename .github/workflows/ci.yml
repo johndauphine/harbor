@@ -1,0 +1,112 @@
+name: Test and build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: go mod verify
+      - run: go test -race -timeout 5m ./...
+      - run: go vet ./...
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        if: runner.os == 'Linux'
+        with:
+          node-version: '24'
+      - name: Frontend and native browser regressions
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          export HARBOR_TEST_CHROMIUM="$(command -v google-chrome)"
+          test -x "$HARBOR_TEST_CHROMIUM"
+          node --test tests/*.test.cjs
+
+  vulnerabilities:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - {os: darwin, arch: arm64}
+          - {os: windows, arch: arm64}
+          - {os: windows, arch: amd64}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: go install golang.org/x/vuln/cmd/govulncheck@v1.3.0
+      - name: Check reachable vulnerabilities for shipped target
+        run: govulncheck ./...
+        env:
+          GOOS: ${{ matrix.target.os }}
+          GOARCH: ${{ matrix.target.arch }}
+          CGO_ENABLED: '0'
+
+  builds:
+    needs: [test, vulnerabilities]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build standalone executables and checksums
+        shell: bash
+        env:
+          CGO_ENABLED: '0'
+        run: |
+          mkdir -p dist
+          GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags "-X main.version=development-${GITHUB_SHA::12}" -o dist/harbor-macos-arm64 .
+          GOOS=windows GOARCH=arm64 go build -trimpath -ldflags "-X main.version=development-${GITHUB_SHA::12}" -o dist/harbor-windows-arm64.exe .
+          GOOS=windows GOARCH=amd64 go build -trimpath -ldflags "-X main.version=development-${GITHUB_SHA::12}" -o dist/harbor-windows-amd64.exe .
+          (cd dist && sha256sum harbor-* > SHA256SUMS)
+      - name: Describe artifact trust status
+        shell: bash
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<'SUMMARY'
+          ### Development artifacts
+          These executables are unsigned CI builds, not a published or trusted release.
+          SHA256SUMS detects file changes; it does not establish publisher identity.
+          macOS public distribution still needs a valid Developer ID Application identity,
+          hardened-runtime signing and Apple notarization using the owner's developer account.
+          Windows publisher signing needs an approved code-signing certificate or signing service.
+          Signing credentials must be configured separately; none are required or exposed by this workflow.
+          SUMMARY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: harbor-unsigned-${{ github.sha }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 14

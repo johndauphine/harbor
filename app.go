@@ -127,40 +127,59 @@ func (a *App) openStore() (*sql.DB, error) {
 	}
 	return db, nil
 }
-func (a *App) startup(ctx context.Context) {
+func (a *App) startup(ctx context.Context) (startupErr error) {
 	a.ctx, a.appCancel = context.WithCancel(ctx)
-	dir, err := os.UserHomeDir()
-	if err != nil {
-		return
-	}
+	defer func() {
+		if startupErr != nil {
+			a.appCancel()
+		}
+	}()
 	if a.configFile == "" {
-		a.configFile = filepath.Join(dir, ".harbor", "profiles.db")
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return fmt.Errorf("Find configuration directory: %w", err)
+		}
+		a.configFile = filepath.Join(home, ".harbor", "profiles.db")
 	}
 	db, err := a.openStore()
 	if err != nil {
-		return
+		return fmt.Errorf("Open configuration database: %w", err)
 	}
 	defer db.Close()
-	rows, err := db.Query("SELECT p.metadata, COALESCE(c.credential_id,p.id) FROM profiles p LEFT JOIN profile_credentials c ON c.profile_id=p.id ORDER BY p.id")
+	rows, err := db.Query("SELECT p.id, p.metadata, COALESCE(c.credential_id,p.id) FROM profiles p LEFT JOIN profile_credentials c ON c.profile_id=p.id ORDER BY p.id")
 	if err != nil {
-		return
+		return fmt.Errorf("Read saved connections: %w", err)
 	}
 	defer rows.Close()
+	var loaded []Profile
 	for rows.Next() {
-		var raw, credentialID string
-		if rows.Scan(&raw, &credentialID) == nil {
-			var p Profile
-			if json.Unmarshal([]byte(raw), &p) == nil {
-				p.credentialID = credentialID
-				a.profiles = append(a.profiles, p)
-			}
+		var storedID, raw, ref string
+		if err = rows.Scan(&storedID, &raw, &ref); err != nil {
+			return fmt.Errorf("Read saved connection: %w", err)
 		}
+		var p Profile
+		if err = json.Unmarshal([]byte(raw), &p); err != nil {
+			return errors.New("Configuration contains invalid connection metadata; restore a valid configuration backup or use a separate database")
+		}
+		if p.ID == "" || p.ID != storedID || ref == "" || validate(p) != nil {
+			return errors.New("Configuration contains an invalid saved connection; restore a valid configuration backup or use a separate database")
+		}
+		p.credentialID = ref
+		loaded = append(loaded, p)
 	}
-	rows.Close()
-	if err := a.cleanupCredentials(db); err != nil {
+	if err = rows.Err(); err != nil {
+		return fmt.Errorf("Read saved connections: %w", err)
+	}
+	if err = rows.Close(); err != nil {
+		return fmt.Errorf("Close saved connection query: %w", err)
+	}
+	a.profileMu.Lock()
+	defer a.profileMu.Unlock()
+	a.profiles = loaded
+	if err = a.cleanupCredentials(db); err != nil {
 		log.Print("Unused credential cleanup remains pending; unlock the credential vault and restart Harbor to retry")
 	}
-
+	return nil
 }
 
 var errShuttingDown = errors.New("Application is shutting down")
@@ -686,7 +705,8 @@ func (a *App) run(id string, attempt uint64) {
 	if err != nil {
 		t.Status = "failed"
 		t.Error = err.Error()
-		if ctx.Err() != nil {
+		var cleanupErr *multipartCleanupError
+		if ctx.Err() != nil && !errors.As(err, &cleanupErr) {
 			t.Status = "cancelled"
 			t.Error = ""
 		}
@@ -703,6 +723,27 @@ func (a *App) run(id string, attempt uint64) {
 		}
 	}
 }
+
+// Multipart cleanup must still reach S3 after the transfer context is cancelled.
+// The SDK otherwise reuses the cancelled context and silently leaves remote parts.
+type cleanupUploadClient struct {
+	*s3.Client
+	abortErr error
+}
+type multipartCleanupError struct{}
+
+func (*multipartCleanupError) Error() string {
+	return "Upload stopped, but remote multipart cleanup failed. Incomplete upload parts may remain; check the bucket’s incomplete uploads before retrying."
+}
+
+func (c *cleanupUploadClient) AbortMultipartUpload(ctx context.Context, in *s3.AbortMultipartUploadInput, opts ...func(*s3.Options)) (*s3.AbortMultipartUploadOutput, error) {
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	out, err := c.Client.AbortMultipartUpload(cleanupCtx, in, opts...)
+	c.abortErr = err
+	return out, err
+}
+
 func (a *App) execute(ctx context.Context, t Transfer) error {
 	c, e := a.client(ctx, t.ProfileID)
 	if e != nil {
@@ -733,7 +774,11 @@ func (a *App) execute(ctx context.Context, t Transfer) error {
 			return e
 		}
 		total(st.Size())
-		_, e = manager.NewUploader(c).Upload(ctx, &s3.PutObjectInput{Bucket: aws.String(t.Bucket), Key: aws.String(t.Key), Body: &progressReader{Reader: f, update: update}})
+		uploadClient := &cleanupUploadClient{Client: c}
+		_, e = manager.NewUploader(uploadClient).Upload(ctx, &s3.PutObjectInput{Bucket: aws.String(t.Bucket), Key: aws.String(t.Key), Body: &progressReader{Reader: f, update: update}})
+		if uploadClient.abortErr != nil {
+			return &multipartCleanupError{}
+		}
 		return e
 	}
 	v, e := c.GetObject(ctx, &s3.GetObjectInput{Bucket: aws.String(t.Bucket), Key: aws.String(t.Key)})
