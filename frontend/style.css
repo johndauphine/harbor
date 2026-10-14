@@ -15,3 +15,5 @@ nav{flex-wrap:wrap}nav input{min-width:180px}aside{flex-shrink:0}
 #upload-dialog{width:600px;max-width:90vw}#upload-files{max-height:260px;overflow:auto;border:1px solid #d4dee6;border-radius:6px;padding:8px;margin-top:12px}#upload-files button{display:block;width:100%;text-align:left;margin:3px 0}#upload-files button.active{background:#d7eafa;border-color:#1668a6;font-weight:600}#upload-error{color:#a52c2c}#upload-selection{font-weight:600}
 
 #location{display:flex;align-items:center;gap:6px;flex-wrap:wrap;min-height:32px}.breadcrumb{font-size:16px;background:transparent;border:1px solid transparent;padding:5px 8px;font-weight:500;color:#1668a6;overflow-wrap:anywhere;max-width:100%;text-align:left}.breadcrumb:hover{background:#e4eff8;border-color:#c1d8ea}.breadcrumb.current{background:#e7eef5;color:#23485d;font-weight:700}.breadcrumb:focus-visible{outline:2px solid #1668a6;outline-offset:2px}.breadcrumb-separator{font-size:18px;color:#8293a2;font-weight:400}
+
+#message{font-size:12px}
