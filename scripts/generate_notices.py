@@ -38,14 +38,14 @@ def notice_documents(root, package_dirs):
 
 
 def render_notices():
-    environment = json.loads(subprocess.check_output(["go", "env", "-json", "GOROOT", "GOVERSION"], cwd=ROOT, text=True))
+    environment = json.loads(subprocess.check_output(["go", "env", "-json", "GOROOT", "GOVERSION"], cwd=ROOT, text=True, encoding="utf-8"))
     goroot = Path(environment["GOROOT"])
     standard_dirs = set()
     modules = {}
     for target in TARGETS:
         system, arch = target.split("/")
         output = subprocess.check_output(["go", "list", "-deps", "-json", "."], cwd=ROOT,
-                                         env=dict(os.environ, GOOS=system, GOARCH=arch, CGO_ENABLED="0"), text=True)
+                                         env=dict(os.environ, GOOS=system, GOARCH=arch, CGO_ENABLED="0"), text=True, encoding="utf-8")
         for package in json_stream(output):
             if package.get("Standard"):
                 standard_dirs.add(package["Dir"])

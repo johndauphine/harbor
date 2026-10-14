@@ -50,7 +50,7 @@ def main():
         if host != metadata["target"]:
             raise SystemExit(f"Archive requires {metadata['target']}; current host is {host}")
         executable = unpacked / ("harbor.exe" if os.name == "nt" else "harbor")
-        version = subprocess.check_output([str(executable), "--version"], text=True).strip()
+        version = subprocess.check_output([str(executable), "--version"], text=True, encoding="utf-8").strip()
         if (metadata["version"] not in version or metadata["target"] not in version
                 or metadata["toolchain"] not in version or metadata["revision"][:12] not in version
                 or ("-modified" in version) != metadata["modified"]):
@@ -61,7 +61,7 @@ def main():
                            XDG_CACHE_HOME=str(root / "cache"), LOCALAPPDATA=str(root / "cache"))
         flags = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
         process = subprocess.Popen([str(executable), "--db", str(settings)], stdout=subprocess.PIPE,
-                                   stderr=subprocess.PIPE, text=True, env=environment, creationflags=flags)
+                                   stderr=subprocess.PIPE, text=True, encoding="utf-8", env=environment, creationflags=flags)
         lines = queue.Queue()
         def read_lines():
             for line in process.stdout:

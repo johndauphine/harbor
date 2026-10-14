@@ -20,7 +20,7 @@ TARGETS = (("darwin", "arm64"), ("windows", "arm64"), ("windows", "amd64"))
 
 
 def run(*args, **kwargs):
-    return subprocess.check_output(args, cwd=ROOT, text=True, **kwargs).strip()
+    return subprocess.check_output(args, cwd=ROOT, text=True, encoding="utf-8", **kwargs).strip()
 
 
 def archive_name(version, target):
