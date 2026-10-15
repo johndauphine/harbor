@@ -4,6 +4,38 @@ Harbor is a standalone Go executable serving an embedded S3 browser on loopback 
 
 Current source includes saved connection profiles with OS credential vault storage, S3 bucket and prefix browsing, pagination, and background transfers. Browser uploads now stage files locally and support background progress, cancellation, and retry. Downloads also run in the background with progress, cancellation, and retry. Download opens Save As first and saves automatically to the selected destination. This is a pre-release build. Keep backups and verify behavior with disposable files before using important data. It has not been assessed for regulated federal use.
 
+## Linux x64 support
+
+Linux builds target **x86-64 / AMD64**. Linux ARM64 is not currently packaged. Linux support was added after the initial v0.1.0 beta; that release does not contain a Linux asset. The [GitHub Actions workflow](https://github.com/johndauphine/harbor/actions/workflows/ci.yml) produces Linux development archives when its checks pass.
+
+### Runtime requirements
+
+- A Linux x64 system and a current local web browser. Distribution-specific desktop compatibility has not yet been fully validated.
+- A user D-Bus session and a running Secret Service provider with an unlocked **login** collection, such as GNOME Keyring, for saving and retrieving credentials. Run Harbor as your desktop user, not with `sudo`.
+- System CA certificates for verified HTTPS connections to S3-compatible storage.
+- `xdg-open` (commonly supplied by `xdg-utils`) for automatic browser opening. It is optional: use `--no-browser` and open the printed URL manually.
+- Writable home/cache directories and sufficient free disk space for transfer staging; uploads are currently limited to 5 GiB.
+
+The packaged executable does not require Go, Node.js, Wails, or WebView2. A headless system without a user keyring cannot save credentials. `--no-browser` only disables browser launching; it does not remove the keyring requirement or enable remote access. Harbor provides no plaintext credential fallback.
+
+### Install and run
+
+Download the Linux `.tar.gz` archive and its matching `SHA256SUMS`. In the download directory, verify the archive with `sha256sum --ignore-missing -c SHA256SUMS` and confirm that the Linux archive reports `OK`. Extract it into a new folder using your archive manager; the archive preserves executable permissions. Open a terminal in that folder and run:
+
+```sh
+./harbor
+```
+
+Harbor opens the default browser. If that fails, open the printed session URL on the same computer, or start with `./harbor --no-browser`. Keep the session URL private. Stop Harbor with Ctrl+C; closing the browser tab does not stop it.
+
+Settings default to `~/.harbor/profiles.db`; `--db /chosen/path/profiles.db` selects another location. Credentials remain in the Secret Service keyring. See [upgrade instructions](UPGRADE.md) before moving or restoring settings.
+
+### Validation and troubleshooting
+
+A Linux x64 development archive passed checksum verification, extraction, version checks, isolated startup, embedded-page loading, and shutdown in an emulated Linux x64 container. CI is configured to run native Linux regression, browser-form, large-transfer, vulnerability, and archive-startup checks. Full interactive Linux desktop behavior, automatic browser opening, and real Secret Service credential integration have not yet been verified.
+
+If credential saving fails, check that Harbor runs in your logged-in desktop session and that the Secret Service login keyring is available and unlocked. If automatic browser opening fails, use the printed URL on the same machine. Archives are unsigned development builds until explicitly published as a release.
+
 ## Development
 
 Requires Go 1.26.9 or newer; use the patched version recorded in `go.mod`. Run `go test ./...` then `go run .`. Harbor opens your default browser automatically. The session URL is also printed as a fallback; keep it private. Use `--no-browser` for unattended startup or to open the URL yourself. Stop with Ctrl+C. Source has no dependency on Node, Wails, WebView2, or a separate server.
@@ -90,9 +122,3 @@ Regulated federal use remains outside the current release target. This app does 
 ## License
 
 Copyright 2026 John Dauphine. Licensed under the [Apache License, Version 2.0](LICENSE). Third-party dependencies retain their own licenses.
-
-## Linux x64 builds
-
-Linux x64 archives preserve executable permissions. Extract the tar.gz archive and run `./harbor`; use `--no-browser` when opening the printed session URL manually. Automatic opening uses `xdg-open`. Install system CA certificates for verified HTTPS. Saving credentials requires a user D-Bus session and an unlocked Secret Service login collection, such as GNOME Keyring. A bare headless server without that service cannot save credentials; there is no plaintext fallback.
-
-Linux CI validates regressions, browser form behavior, large transfers, vulnerability checks, and native archive startup/shutdown. Full interactive desktop and real Linux keyring testing remain outside this coverage.
