@@ -125,8 +125,8 @@ async function transfers(){
    entry.label.textContent=t.Direction+' · '+t.Key+' · '+t.Status+' · '+t.Done.toLocaleString()+' / '+t.Total.toLocaleString()+' bytes '+(t.Error||'');
    entry.timestamp.textContent=t.CreatedAt&&!t.CreatedAt.startsWith('0001-')?'Queued '+new Date(t.CreatedAt).toLocaleString():'';
    const saved=t.SavedPath?'✓ Saved to '+t.SavedPath+(t.SavedAt&&!t.SavedAt.startsWith('0001-')?' · '+new Date(t.SavedAt).toLocaleString():''):'';
-   entry.notice.textContent=[saved,t.SaveError?'Save failed: '+t.SaveError:''].filter(Boolean).join(' — ');
-   entry.notice.className='transfer-notice'+(t.SaveError?' transfer-save-error':'');
+   entry.notice.textContent=[saved,t.SaveError?'Save failed: '+t.SaveError:'',t.CleanupError||''].filter(Boolean).join(' — ');
+   entry.notice.className='transfer-notice'+(t.SaveError||t.CleanupError?' transfer-save-error':'');
    entry.notice.hidden=!entry.notice.textContent;
    if(entry.status!==t.Status){
     entry.controls.replaceChildren();

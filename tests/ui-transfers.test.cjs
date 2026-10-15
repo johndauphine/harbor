@@ -16,7 +16,7 @@ class Element {
 }
 test('terminal transfers refresh once, preserve selection, and report failures and retries', async()=>{
  const elements=new Map();const get=id=>{if(!elements.has(id))elements.set(id,new Element());return elements.get(id);};
- let transfers=[],browseCalls=0,downloadRequests=[],uploadRequests=[];
+ let transfers=[],browseCalls=0,downloadRequests=[],uploadRequests=[],retryRequests=[];
  const context={document:{getElementById:get,createElement:()=>new Element()},location:{hash:'#fixture',pathname:'/'},sessionStorage:{getItem(){},setItem(){}},history:{replaceState(){}},setInterval(){},setTimeout,clearTimeout,setTimeout,URL,URLSearchParams,confirm:()=>true,
  fetch:async(url,options)=>{
   let result;
@@ -27,6 +27,7 @@ test('terminal transfers refresh once, preserve selection, and report failures a
   else if(url.endsWith('/save-locations'))result={Path:'/Downloads',Home:'/home',Parent:'/',Folders:[]};
   else if(url.endsWith('/download')){downloadRequests.push(JSON.parse(options.body));result={ID:'new',Path:'/Downloads/fixture.txt'};}
   else if(url.endsWith('/transfers'))result=transfers.map(t=>({...t}));
+  else if(url.endsWith('/retry')){retryRequests.push(JSON.parse(options.body));result='queued';}
   else if(url.endsWith('/browse')){browseCalls++;result={Objects:[{Key:'fixture.txt',Size:3,Folder:false,ETag:'etag'}],Next:''};}
   else throw Error('Unexpected endpoint '+url);
   return {ok:true,json:async()=>result};
@@ -65,4 +66,14 @@ test('terminal transfers refresh once, preserve selection, and report failures a
  get('path').value='first//last/';await get('go').click();await get('location').children[4].click();assert.equal(get('path').value,'first//','preserve exact S3 prefixes');
  await get('profiles').children[0].children[0].click();assert.equal(get('location').children.length,0,'clear stale breadcrumbs when switching connections');
 
+
+ transfers=[{...transfer,ID:'restored',Status:'failed',Error:'Interrupted when Harbor stopped. Retry to restart this transfer.',CleanupError:'Remote multipart cleanup pending'}];
+ await context.transfers();
+ const restoredRow=get('transfers').children[0];
+ assert.match(restoredRow.children[0].textContent,/Interrupted when Harbor stopped/);
+ assert.match(restoredRow.children[2].textContent,/Remote multipart cleanup pending/);
+ assert.match(restoredRow.children[2].className,/transfer-save-error/);
+ assert.equal(restoredRow.children[1].children[0].textContent,'Retry');
+ await restoredRow.children[1].children[0].click();
+ assert.deepEqual(retryRequests,[{ID:'restored'}]);
 });

@@ -152,12 +152,11 @@ func webHandler(a *App, host, token string) http.Handler {
 				http.Error(w, "Connection unavailable", 400)
 				return
 			}
-			dir, err := os.UserCacheDir()
+			dir, err := a.transferCacheDir()
 			if err != nil {
 				http.Error(w, "Cache unavailable", 500)
 				return
 			}
-			dir = dir + "/HarborS3"
 			if err = os.MkdirAll(dir, 0700); err != nil {
 				http.Error(w, "Cache unavailable", 500)
 				return
@@ -169,16 +168,19 @@ func webHandler(a *App, host, token string) http.Handler {
 			}
 			path := f.Name()
 			_, err = io.Copy(f, r.Body)
+			if err == nil {
+				err = f.Sync()
+			}
 			closeErr := f.Close()
 			if err != nil || closeErr != nil {
 				os.Remove(path)
 				http.Error(w, "Upload staging failed", 400)
 				return
 			}
-			id := a.queue("upload", profile, bucket, key, path)
-			if id == "" {
+			id, queueErr := a.queueTransfer("upload", profile, bucket, key, path)
+			if queueErr != nil {
 				os.Remove(path)
-				http.Error(w, errShuttingDown.Error(), http.StatusServiceUnavailable)
+				http.Error(w, queueErr.Error(), http.StatusServiceUnavailable)
 				return
 			}
 			w.Header().Set("Content-Type", "application/json")
