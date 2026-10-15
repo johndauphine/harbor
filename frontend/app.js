@@ -66,26 +66,95 @@ async function browse(append=false,options={}){
  }catch(e){$('connection-error').textContent=e.message}
 };$('refresh').onclick=action(()=>browse());$('go').onclick=action(openTypedPath);$('up').onclick=action(async()=>{prefix=prefix.replace(/[^/]+\/$/,'');await browse()});$('test').onclick=action(async()=>{if(!profile)throw Error('Choose a connection first');message(await api('test',{ProfileID:profile}))});$('more').onclick=action(()=>browse(true));action(profiles)();
 
-let uploading=false,uploadDirectory=null,uploadSelection=null,uploadTarget=null;
+let uploading=false,uploadTarget=null,uploadItems=[],uploadStop=false,uploadCollecting=false,uploadGeneration=0;
 function localChild(directory,name){const sep=directory.includes('\\')?'\\':'/';return directory.replace(/[\\/]$/,'')+sep+name}
-async function loadUploadFolder(path=''){
- const locations=await api('upload-locations',{Path:path});uploadDirectory=locations;uploadSelection=null;$('upload-confirm').disabled=true;$('upload-selection').textContent='Choose a file.';$('upload-path').value=locations.Path;
- const folders=locations.Folders.map(name=>button('▸ '+name,()=>loadUploadFolder(localChild(locations.Path,name))));
- const files=(locations.Files||[]).map(file=>{const row=button(file.Name+' · '+file.Size.toLocaleString()+' bytes',()=>{uploadSelection={Path:localChild(locations.Path,file.Name),Name:file.Name};for(const peer of $('upload-files').children)peer.classList.remove('active');row.classList.add('active');$('upload-selection').textContent='Selected: '+file.Name;$('upload-confirm').disabled=false});return row});
- $('upload-files').replaceChildren(...folders,...files);if(!folders.length&&!files.length)$('upload-files').textContent='This folder is empty.';$('upload-error').textContent='';
+function renderUpload(){
+ const busy=uploading||uploadCollecting;
+ $('upload-dropzone').setAttribute('aria-disabled',String(busy));
+ $('upload-confirm').disabled=busy||!uploadItems.length;
+ $('upload-clear').disabled=busy||!uploadItems.length;
+ $('upload-add-files').disabled=busy;$('upload-add-folder').disabled=busy;
+ $('upload-cancel').textContent=uploading?(uploadStop?'Stopping after this file…':'Stop after this file'):'Cancel';
+ $('upload-empty').hidden=uploadItems.length>0;$('upload-table').hidden=!uploadItems.length;
+ $('upload-selection').textContent=uploadItems.length+' '+(uploadItems.length===1?'file':'files')+' · '+formatBytes(uploadItems.reduce((sum,item)=>sum+item.file.size,0));
+ $('upload-rows').replaceChildren(...uploadItems.map(item=>{
+  const row=document.createElement('tr');
+  for(const value of [item.path,item.file.name.includes('.')?item.file.name.split('.').pop().toUpperCase():'File',formatBytes(item.file.size),item.status||'Ready']){const cell=document.createElement('td');cell.textContent=value;cell.title=value;row.append(cell)}
+  const cell=document.createElement('td'),remove=button('Remove',()=>{if(busy)return;const index=uploadItems.indexOf(item);uploadItems=uploadItems.filter(peer=>peer!==item);renderUpload();const nextRow=$('upload-rows').children[Math.min(index,uploadItems.length-1)];(nextRow?.children[4].children[0]||$('upload-add-files')).focus?.()});remove.disabled=busy;remove.setAttribute('aria-label','Remove '+item.path);cell.append(remove);row.append(cell);return row;
+ }));
 }
-$('upload').onclick=action(async()=>{if(!bucket)throw Error('Choose a bucket first');uploadTarget={ProfileID:profile,Bucket:bucket,Prefix:prefix};$('upload-destination').textContent='Upload to '+bucket+'/'+prefix;$('upload-dialog').showModal();try{await loadUploadFolder()}catch(e){$('upload-error').textContent=e.message}});
-$('upload-home').onclick=()=>loadUploadFolder(uploadDirectory?.Home||'').catch(e=>$('upload-error').textContent=e.message);
-$('upload-up').onclick=()=>loadUploadFolder(uploadDirectory?.Parent||'').catch(e=>$('upload-error').textContent=e.message);
-$('upload-go').onclick=()=>loadUploadFolder($('upload-path').value).catch(e=>$('upload-error').textContent=e.message);
-$('upload-cancel').onclick=()=>{if(!uploading)$('upload-dialog').close()};
-$('upload-dialog').oncancel=e=>{if(uploading)e.preventDefault()};
+function addUploadFiles(files){
+ if(uploading||uploadCollecting)return;
+ const errors=[];
+ for(const entry of files){
+  const file=entry.file||entry,path=entry.path||file.webkitRelativePath||file.name;
+  if(!path||path.startsWith('/')||path.split('/').some(part=>!part||part==='.'||part==='..')||path.includes('\0')){errors.push('Invalid file path: '+path);continue}
+  if(file.size>5*1024**3){errors.push(path+' exceeds the 5 GiB file limit.');continue}
+  if(uploadItems.some(item=>item.path===path)){errors.push(path+' is already in the list. Remove it before choosing a replacement.');continue}
+  if(uploadItems.length>=1000){errors.push('Select up to 1,000 files per upload.');break}
+  uploadItems.push({file,path,status:'Ready'});
+ }
+ $('upload-error').textContent=errors.join('\n');renderUpload();
+}
+$('upload').onclick=action(async()=>{
+ if(!bucket)throw Error('Choose a bucket first');uploadGeneration++;uploadItems=[];uploadStop=false;uploadCollecting=false;
+ uploadTarget={ProfileID:profile,Bucket:bucket,Prefix:prefix};
+ $('upload-destination').textContent='s3://'+bucket+'/'+prefix;
+ $('upload-connection').textContent=connectionProfiles.find(p=>p.ID===profile)?.Name||profile;
+ $('upload-error').textContent='';$('upload-file-input').value='';$('upload-folder-input').value='';renderUpload();$('upload-dialog').showModal();
+});
+$('upload-add-files').onclick=()=>{if(!uploading&&!uploadCollecting)$('upload-file-input').click()};
+$('upload-add-folder').onclick=()=>{if(!uploading&&!uploadCollecting)$('upload-folder-input').click()};
+for(const id of ['upload-file-input','upload-folder-input'])$(id).onchange=()=>{addUploadFiles(Array.from($(id).files||[]));$(id).value=''};
+$('upload-clear').onclick=()=>{if(!uploading&&!uploadCollecting){uploadItems=[];$('upload-error').textContent='';renderUpload()}};
+function closeUpload(){uploadGeneration++;uploadCollecting=false;$('upload-dialog').close();uploadItems=[];uploadTarget=null}
+$('upload-cancel').onclick=()=>{if(uploading){uploadStop=true;renderUpload()}else closeUpload()};
+$('upload-dialog').oncancel=e=>{if(uploading)e.preventDefault();else{uploadGeneration++;uploadCollecting=false;uploadItems=[];uploadTarget=null}};
+const uploadDrop=$('upload-dropzone');
+uploadDrop.onclick=()=>$('upload-add-files').onclick();
+uploadDrop.onkeydown=e=>{if(e.target===uploadDrop&&(e.key==='Enter'||e.key===' ')){e.preventDefault();$('upload-add-files').onclick()}};
+uploadDrop.ondragover=e=>{e.preventDefault();if(!uploading&&!uploadCollecting)uploadDrop.classList.add('drag-over')};
+uploadDrop.ondragleave=()=>uploadDrop.classList.remove('drag-over');
+async function droppedUploadFiles(data){
+ const result=[];
+ async function visit(entry,parent=''){
+  const path=parent+entry.name;
+  if(entry.isFile){const file=await new Promise((resolve,reject)=>entry.file(resolve,reject));result.push({file,path});if(result.length>1000)throw Error('Select up to 1,000 files per upload.');return}
+  if(entry.isDirectory){const reader=entry.createReader();for(;;){const batch=await new Promise((resolve,reject)=>reader.readEntries(resolve,reject));if(!batch.length)break;for(const child of batch)await visit(child,path+'/')}}
+ }
+ const entries=Array.from(data.items||[]).filter(item=>item.kind==='file').map(item=>item.webkitGetAsEntry?.()||item.getAsEntry?.());
+ if(entries.length&&entries.every(Boolean)){for(const entry of entries)await visit(entry);return result}
+ return Array.from(data.files||[]);
+}
+uploadDrop.ondrop=async e=>{
+ e.preventDefault();uploadDrop.classList.remove('drag-over');if(uploading||uploadCollecting)return;
+ const generation=uploadGeneration;uploadCollecting=true;renderUpload();$('upload-error').textContent='Reading dropped files…';
+ try{const files=await droppedUploadFiles(e.dataTransfer);if(generation!==uploadGeneration)return;uploadCollecting=false;addUploadFiles(files);if(!files.length)$('upload-error').textContent='No files found. Use Add files or Add folder to choose files. Empty folders are not uploaded.'}
+ catch(error){if(generation===uploadGeneration)$('upload-error').textContent='Could not add dropped files: '+error.message}
+ finally{if(generation===uploadGeneration){uploadCollecting=false;renderUpload()}}
+};
 $('upload-form').onsubmit=async e=>{
- e.preventDefault();if(uploading||!uploadSelection||!uploadTarget)return;
- const request={ProfileID:uploadTarget.ProfileID,Bucket:uploadTarget.Bucket,Key:uploadTarget.Prefix+uploadSelection.Name,Path:uploadSelection.Path};
- if(!confirm('Upload to '+request.Bucket+'/'+request.Key+'? An existing object with this key will be replaced.'))return;
- uploading=true;$('upload-confirm').disabled=true;$('upload-cancel').disabled=true;$('upload-error').textContent='Preparing upload…';
- try{await api('upload-local',request);$('upload-dialog').close();message('Upload queued');await transfers()}catch(e){$('upload-error').textContent=e.message}finally{uploading=false;$('upload-confirm').disabled=!uploadSelection;$('upload-cancel').disabled=false}
+ e.preventDefault();if(uploading||uploadCollecting||!uploadItems.length||!uploadTarget)return;
+ uploading=true;uploadStop=false;let queued=0;const errors=[];
+ const target={...uploadTarget},items=uploadItems.slice();$('upload-error').textContent='';renderUpload();
+ for(const item of items){
+  if(uploadStop)break;
+  item.status='Preparing…';renderUpload();
+  try{
+   const query=new URLSearchParams({profile:target.ProfileID,bucket:target.Bucket,key:target.Prefix+item.path});
+   const response=await fetch('/api/upload?'+query,{method:'POST',headers:{Authorization:'Bearer '+session,'Content-Type':'application/octet-stream'},body:item.file});
+   if(!response.ok)throw Error((await response.text()).trim()||'Upload could not be prepared');
+   await response.json();item.status='Queued';queued++;
+  }catch(error){item.status='Failed';errors.push(item.path+': '+error.message)}
+  renderUpload();
+ }
+ uploading=false;uploadItems=uploadItems.filter(item=>item.status!=='Queued');renderUpload();
+ if(!uploadItems.length)closeUpload();
+ else $('upload-error').textContent=(uploadStop?'Stopped adding uploads. Already queued transfers continue in Transfers.\n':'')+errors.join('\n');
+ // Finalize this draft before awaiting status refresh: the user can now open a
+ // different draft, which this completed operation must never close or modify.
+ const finishedGeneration=uploadGeneration;
+ if(queued){message(queued+' '+(queued===1?'upload':'uploads')+' queued');try{await transfers()}catch(error){if(uploadGeneration===finishedGeneration)message('Uploads were queued, but transfer status could not be refreshed: '+error.message)}}
 };
 $('download').onclick=action(async()=>{const files=selectedFiles(),target=listingContext;if(!files.length)throw Error('Select files first');await saveDownload(files.map(o=>({ProfileID:target.ProfileID,Bucket:target.Bucket,Key:o.Key}))) });
 let savingDownload=false,saveTransfer=null,saveDirectory=null;

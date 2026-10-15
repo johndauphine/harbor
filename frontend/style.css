@@ -1164,7 +1164,7 @@ dialog::backdrop {
   color:var(--danger);
 }
 
-#save-dialog,#upload-dialog {
+#save-dialog {
   width:620px;
 }
 
@@ -1189,7 +1189,7 @@ dialog::backdrop {
   min-height:35px;
 }
 
-#save-folders,#upload-files {
+#save-folders {
   max-height:260px;
   min-height:80px;
   overflow:auto;
@@ -1199,7 +1199,7 @@ dialog::backdrop {
   margin-top:12px;
 }
 
-#save-folders button,#upload-files button {
+#save-folders button {
   display:block;
   width:100%;
   text-align:left;
@@ -1208,16 +1208,6 @@ dialog::backdrop {
   margin:1px 0;
   border:0;
   padding:8px 10px;
-}
-
-#upload-files button.active {
-  background:var(--blue-soft);
-  color:var(--selected-text);
-  font-weight:600;
-}
-
-#upload-selection {
-  font-weight:600;
 }
 
 .sr-only {
@@ -1230,6 +1220,271 @@ dialog::backdrop {
 
 [hidden] {
   display:none!important;
+}
+
+/* Upload workspace: selection, exact destination, and explicit submission. */
+#upload-dialog {
+  width:1000px;
+}
+
+.upload-heading {
+  background:var(--surface);
+}
+
+.upload-workspace {
+  display:flex;
+  flex-direction:column;
+  gap:18px;
+  padding:22px 26px;
+  background:var(--canvas);
+}
+
+.upload-card {
+  min-width:0;
+  overflow:hidden;
+  border:1px solid var(--border);
+  border-radius:8px;
+  background:var(--surface);
+}
+
+.upload-card-heading {
+  display:flex;
+  justify-content:space-between;
+  align-items:center;
+  gap:14px;
+  padding:18px 20px;
+  border-bottom:1px solid var(--border);
+}
+
+.upload-card h3 {
+  margin:0;
+  color:var(--text);
+  font-size:16px;
+  font-weight:650;
+  letter-spacing:-.15px;
+}
+
+#upload-selection {
+  margin-top:4px;
+  color:var(--muted);
+  font-size:12px;
+}
+
+.upload-add-actions {
+  display:flex;
+  align-items:center;
+  flex-wrap:wrap;
+  justify-content:flex-end;
+  gap:8px;
+}
+
+#upload-clear {
+  border-color:transparent;
+  background:transparent;
+  color:var(--muted);
+}
+
+#upload-clear:not(:disabled):hover {
+  background:var(--hover);
+  color:var(--text);
+}
+
+#upload-dropzone {
+  cursor:pointer;
+  margin:18px 20px;
+  border:1px dashed var(--control-border-hover);
+  border-radius:6px;
+  background:var(--surface-subtle);
+  transition:background .12s,border-color .12s;
+}
+
+#upload-dropzone:hover,#upload-dropzone.drag-over {
+  border-color:var(--blue);
+  background:var(--blue-soft);
+}
+
+#upload-dropzone:focus-visible {
+  outline:3px solid var(--focus);
+  outline-offset:2px;
+}
+
+#upload-empty {
+  display:flex;
+  flex-direction:column;
+  align-items:center;
+  gap:7px;
+  padding:26px 16px;
+  text-align:center;
+}
+
+.upload-empty-icon {
+  display:grid;
+  place-items:center;
+  width:38px;
+  height:38px;
+  margin-bottom:4px;
+  border:1px solid var(--border);
+  border-radius:9px;
+  color:var(--link);
+  background:var(--surface);
+  font-size:24px;
+}
+
+#upload-empty strong {
+  font-size:14px;
+  font-weight:600;
+}
+
+#upload-empty p,.upload-limits {
+  color:var(--muted);
+  font-size:12px;
+}
+
+.upload-limits {
+  margin-top:4px;
+  font-size:11px;
+}
+
+/* Once files exist, retain a compact drop target above the review table. */
+#upload-dropzone:has(#upload-empty[hidden]) {
+  min-height:40px;
+  margin-bottom:12px;
+}
+
+#upload-dropzone:has(#upload-empty[hidden])::after {
+  content:'Drop more files or folders here';
+  display:block;
+  padding:10px 14px;
+  color:var(--muted);
+  font-size:12px;
+  text-align:center;
+}
+
+#upload-table {
+  max-height:280px;
+  overflow:auto;
+  border-top:1px solid var(--border);
+}
+
+#upload-table table {
+  min-width:640px;
+}
+
+#upload-table th:nth-child(1) { width:42%; }
+#upload-table th:nth-child(2) { width:16%; }
+#upload-table th:nth-child(3) { width:13%; }
+#upload-table th:nth-child(4) { width:17%; }
+#upload-table th:nth-child(5) { width:12%; }
+
+#upload-table th,#upload-table td {
+  display:table-cell;
+  padding:10px 16px;
+  font-size:12px;
+  overflow:hidden;
+  text-overflow:ellipsis;
+}
+
+#upload-table td:first-child {
+  font-weight:500;
+  color:var(--text);
+}
+
+#upload-table td:nth-child(2) {
+  font-weight:400;
+  color:var(--muted);
+}
+
+#upload-table td:last-child {
+  text-align:right;
+}
+
+#upload-table button {
+  min-height:28px;
+  padding:3px 7px;
+  font-size:11px;
+}
+
+.upload-destination-card .upload-card-heading {
+  padding-top:14px;
+  padding-bottom:14px;
+}
+
+.upload-destination-content {
+  padding:15px 20px 18px;
+}
+
+#upload-connection {
+  color:var(--muted);
+  font-size:12px;
+  margin-bottom:5px;
+  overflow-wrap:anywhere;
+}
+
+#upload-destination {
+  color:var(--text);
+  font:12px/1.6 ui-monospace,SFMono-Regular,Menlo,monospace;
+  overflow-wrap:anywhere;
+}
+
+.upload-warning {
+  padding:11px 13px;
+  border:1px solid var(--warning-border);
+  border-left-width:3px;
+  border-radius:6px;
+  background:var(--warning-bg);
+  color:var(--warning-text);
+  font-size:12px;
+  line-height:1.6;
+}
+
+#upload-error {
+  overflow-wrap:anywhere;
+  white-space:pre-wrap;
+  font-size:12px;
+}
+
+#upload-error:empty {
+  display:none;
+}
+
+.upload-footer {
+  padding-top:16px;
+  padding-bottom:16px;
+}
+
+@media(max-width:640px) {
+  .upload-workspace {
+    padding:14px;
+    gap:14px;
+  }
+  .upload-card-heading {
+    flex-direction:column;
+    align-items:flex-start;
+    padding:15px;
+    gap:12px;
+  }
+  .upload-add-actions {
+    justify-content:flex-start;
+    gap:6px;
+    width:100%;
+  }
+  .upload-add-actions button {
+    font-size:12px;
+    padding:5px 8px;
+  }
+  #upload-clear {
+    margin-left:auto;
+    order:1;
+  }
+  #upload-dropzone {
+    margin:14px;
+  }
+  #upload-empty {
+    padding:22px 12px;
+  }
+  .upload-destination-content {
+    padding:13px 15px 15px;
+  }
 }
 
 /* Destructive actions keep the exact target visible through review and completion. */

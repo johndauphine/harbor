@@ -81,6 +81,12 @@ function fixtureAPI() {
  };
  fixture.confirm = text => { fixture.confirmations.push(text); return true; };
  fixture.fetch = async (url, options) => {
+  if (url.startsWith('/api/upload?')) {
+   const query = new URL(url, 'http://localhost').searchParams;
+   const request = {ProfileID:query.get('profile'),Bucket:query.get('bucket'),Key:query.get('key'),file:options.body};
+   if(fixture.onUpload) await fixture.onUpload(request);
+   fixture.uploads.push(request); return {ok:true,json:async()=> 'fixture-upload'};
+  }
   const route = url.slice(url.lastIndexOf('/') + 1), request = JSON.parse(options.body);
   if (held?.route === route && held.path === request.Path) await held.promise;
   let value;
@@ -95,7 +101,7 @@ function fixtureAPI() {
    value = {Path: folder, Home: '/fixture/upload', Parent: '/fixture/upload', Folders: folder === '/fixture/upload' ? ['subfolder'] : [], Files: [{Name: 'upload.txt', Size: 4}]};
   } else if (route === 'download') { fixture.downloads.push(request); value = {ID: 'fixture-download', Path: request.Path + '/' + request.Name}; }
   else if (route === 'upload-local') { fixture.uploads.push(request); value = 'fixture-upload'; }
-  else if (route === 'transfers') value = [];
+  else if (route === 'transfers') { if(fixture.onTransfers) await fixture.onTransfers(); value = []; }
   else throw Error('Unexpected fixture route: ' + route);
   return {ok: true, json: async () => value};
  };
@@ -138,32 +144,30 @@ async function exerciseSave(document, fixture, check) {
  check(!get('save-dialog').open, 'Successful Save closes the dialog');
 }
 
+function pickUpload(document, id, files) {
+ const input=document.getElementById(id);
+ Object.defineProperty(input,'files',{configurable:true,value:files});input.onchange();
+}
 async function exerciseUpload(document, fixture, check) {
- const get = id => document.getElementById(id);
- get('upload').click(); await settle();
- check(get('upload-dialog').open, 'Upload opens the picker');
- check(get('upload-confirm').disabled, 'Upload is disabled before file selection');
- get('upload-files').children[1].click(); await settle();
- check(!get('upload-confirm').disabled, 'Selecting a file enables Upload');
- check(fixture.uploadSubmits === 0, 'Selecting an upload file must not submit');
- check(fixture.uploads.length === 0 && fixture.confirmations.length === 0, 'File selection must not queue or prompt for upload');
- const release = fixture.holdLocation('upload-locations', '/fixture/upload/subfolder');
- get('upload-files').children[0].click(); await settle();
- check(fixture.uploadSubmits === 0, 'Upload folder navigation must not submit with the previous file selection');
- check(fixture.uploads.length === 0, 'Upload folder navigation must not queue the previous file');
- release(); await settle();
- check(get('upload-path').value === '/fixture/upload/subfolder', 'Upload navigation reaches the chosen folder');
- check(get('upload-confirm').disabled, 'Folder navigation clears the previous file selection');
- get('upload-files').children[0].click(); await settle();
- check(fixture.uploadSubmits === 0 && fixture.uploads.length === 0, 'Selecting the new file still waits for explicit Upload');
- check(get('upload-confirm').type === 'submit', 'Upload remains an explicit submit control');
- get('upload-confirm').click(); await settle();
- check(fixture.uploadSubmits === 1, 'Explicit Upload submits exactly once');
- check(fixture.confirmations.length === 1, 'Explicit Upload prompts exactly once');
- check(fixture.uploads.length === 1, 'Explicit Upload queues exactly one upload');
- check(fixture.uploads[0].Path === '/fixture/upload/subfolder/upload.txt', 'Upload uses the chosen local file');
- check(fixture.uploads[0].Bucket === 'fixture-bucket' && fixture.uploads[0].Key === 'upload.txt', 'Upload uses the intended storage destination');
- check(!get('upload-dialog').open, 'Successful Upload closes the picker');
+ const get=id=>document.getElementById(id);
+ get('upload').click();await settle();
+ check(get('upload-dialog').open,'Upload opens the review workspace');
+ check(get('upload-confirm').disabled,'Upload requires a selection');
+ const first={name:'upload.txt',size:4},nested={name:'data.txt',size:7,webkitRelativePath:'reports/nested/data.txt'};
+ pickUpload(document,'upload-file-input',[first]);
+ pickUpload(document,'upload-folder-input',[nested]);
+ check(get('upload-rows').children.length===2,'Files and folders accumulate in one review list');
+ check(fixture.uploads.length===0&&fixture.uploadSubmits===0,'Selecting files never submits');
+ check(get('upload-destination').textContent==='s3://fixture-bucket/','Exact destination is visible');
+ check(get('upload-confirm').type==='submit','Upload is an explicit submit control');
+ get('upload-confirm').click();await settle();
+ check(fixture.uploadSubmits===1,'Explicit Upload submits exactly once');
+ check(fixture.confirmations.length===0,'The review screen is the single confirmation');
+ check(fixture.uploads.length===2,'Both selected files are queued');
+ check(fixture.uploads[0].file===first,'Upload uses the selected file bytes');
+ check(fixture.uploads[1].Key==='reports/nested/data.txt','Folder paths are preserved');
+ check(fixture.uploads[0].Bucket==='fixture-bucket','Destination remains bound to the reviewed bucket');
+ check(!get('upload-dialog').open,'Successful uploads close the workspace');
 }
 
 async function modelFixture() {
@@ -171,7 +175,7 @@ async function modelFixture() {
  const context = {document, fetch: fixture.fetch, confirm: fixture.confirm, location: {hash: '#fixture', pathname: '/'}, sessionStorage: {getItem() {}, setItem() {}}, history: {replaceState() {}}, setInterval() {}, setTimeout, clearTimeout, URL, URLSearchParams};
  vm.createContext(context); vm.runInContext(source, context);
  recordSubmissions(document, fixture); await selectFixture(document);
- return {document, fixture};
+ return {document, fixture, context};
 }
 
 test('default-submit model activates before an async click handler finishes', async () => {
@@ -218,7 +222,7 @@ test('picker navigation and explicit confirmation use native browser form activa
  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'harbor-picker-test-'));
  try {
   const before = `const fixture = (${fixtureAPI})(); window.fetch = fixture.fetch; window.confirm = fixture.confirm; window.setInterval = () => 0;`;
-  const after = `${settle}\n${selectFixture}\n${recordSubmissions}\n${exerciseSave}\n${exerciseUpload}\n(async () => {
+  const after = `${settle}\n${selectFixture}\n${recordSubmissions}\n${exerciseSave}\n${pickUpload}\n${exerciseUpload}\n(async () => {
    const output = document.createElement('pre'); output.id = 'picker-test-result'; document.body.append(output);
    try { recordSubmissions(document, fixture); await selectFixture(document); const check = (condition, message) => { if (!condition) throw Error(message); }; await exerciseSave(document, fixture, check); await exerciseUpload(document, fixture, check); output.textContent = JSON.stringify({ok: true}); }
    catch (error) { output.textContent = JSON.stringify({ok: false, error: error.message, stack: error.stack}); }
@@ -234,4 +238,75 @@ test('picker navigation and explicit confirmation use native browser form activa
   const report = JSON.parse(output[1].replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&'));
   assert.equal(report.ok, true, report.error + '\n' + report.stack);
  } finally { fs.rmSync(temporary, {recursive: true, force: true}); }
+});
+
+test('upload selection rejects duplicates and oversize files; removal and Cancel never upload',async()=>{
+ const {document,fixture}=await modelFixture(),get=id=>document.getElementById(id);
+ get('upload').click();await settle();
+ pickUpload(document,'upload-file-input',[{name:'one.txt',size:2},{name:'one.txt',size:3},{name:'too-large.bin',size:5*1024**3+1}]);
+ assert.equal(get('upload-rows').children.length,1);assert.match(get('upload-error').textContent,/already in the list.*5 GiB/s);
+ get('upload-rows').children[0].children[4].children[0].click();assert.equal(get('upload-confirm').disabled,true);
+ pickUpload(document,'upload-file-input',[{name:'two.txt',size:0}]);get('upload-clear').click();assert.equal(get('upload-rows').children.length,0);
+ pickUpload(document,'upload-file-input',[{name:'two.txt',size:0}]);get('upload-cancel').click();assert.equal(fixture.uploads.length,0);
+ get('upload').click();await settle();assert.equal(get('upload-confirm').disabled,true,'cancelled draft is discarded');
+});
+
+test('batch failure preserves failed files and retries without duplicating successful uploads',async()=>{
+ const {document,fixture}=await modelFixture(),get=id=>document.getElementById(id);
+ get('upload').click();await settle();pickUpload(document,'upload-file-input',[{name:'ok.txt',size:1},{name:'failed.txt',size:2}]);
+ fixture.onUpload=async request=>{if(request.Key==='failed.txt')throw Error('Connection interrupted')};
+ await get('upload-form').onsubmit({preventDefault(){}});
+ assert.equal(fixture.uploads.length,1);assert.equal(get('upload-dialog').open,true);assert.equal(get('upload-rows').children.length,1);assert.match(get('upload-error').textContent,/failed.txt: Connection interrupted/);
+ fixture.onUpload=null;await get('upload-form').onsubmit({preventDefault(){}});
+ assert.deepEqual(fixture.uploads.map(x=>x.Key),['ok.txt','failed.txt']);assert.equal(get('upload-dialog').open,false);
+});
+
+test('Stop after this file preserves already queued work and leaves remaining files for review',async()=>{
+ const {document,fixture}=await modelFixture(),get=id=>document.getElementById(id);
+ get('upload').click();await settle();pickUpload(document,'upload-file-input',[{name:'first.txt',size:1},{name:'later.txt',size:2}]);
+ let release;fixture.onUpload=()=>new Promise(resolve=>release=resolve);
+ const pending=get('upload-form').onsubmit({preventDefault(){}});await settle();
+ get('upload-cancel').click();release();await pending;
+ assert.equal(fixture.uploads.length,1);assert.equal(get('upload-dialog').open,true);assert.equal(get('upload-rows').children.length,1);assert.match(get('upload-error').textContent,/Already queued transfers continue/);
+});
+
+test('dropped folder reads every directory page and preserves nested paths',async()=>{
+ const {document,fixture}=await modelFixture(),get=id=>document.getElementById(id);
+ get('upload').click();await settle();
+ const file=name=>({isFile:true,name,file:resolve=>resolve({name,size:2})});
+ const directory=(name,batches)=>({isDirectory:true,name,createReader:()=>({readEntries:resolve=>resolve(batches.shift()||[])})});
+ const entry=directory('reports',[[file('a.txt')],[directory('nested',[[file('b.txt')]])]]);
+ await get('upload-dropzone').ondrop({preventDefault(){},dataTransfer:{items:[{kind:'file',webkitGetAsEntry:()=>entry}]}});
+ assert.equal(get('upload-rows').children.length,2);await get('upload-form').onsubmit({preventDefault(){}});
+ assert.deepEqual(fixture.uploads.map(x=>x.Key),['reports/a.txt','reports/nested/b.txt']);
+});
+
+test('late dropped-directory results cannot populate a cancelled or reopened draft',async()=>{
+ const {document}=await modelFixture(),get=id=>document.getElementById(id);get('upload').click();await settle();
+ let release;const entry={isFile:true,name:'late.txt',file:resolve=>release=()=>resolve({name:'late.txt',size:1})};
+ const pending=get('upload-dropzone').ondrop({preventDefault(){},dataTransfer:{items:[{kind:'file',webkitGetAsEntry:()=>entry}]}});
+ get('upload-cancel').click();get('upload').click();await settle();release();await pending;
+ assert.equal(get('upload-rows').children.length,0);assert.equal(get('upload-confirm').disabled,true);
+});
+
+
+test('upload keeps the reviewed destination and encodes special characters exactly',async()=>{
+ const {document,fixture,context}=await modelFixture(),get=id=>document.getElementById(id);
+ vm.runInContext("prefix='reviewed/';",context);get('upload').click();await settle();
+ pickUpload(document,'upload-file-input',[{name:'a & + # ü.txt',size:1}]);
+ vm.runInContext("bucket='elsewhere';prefix='changed/';",context);
+ await get('upload-form').onsubmit({preventDefault(){}});
+ assert.equal(fixture.uploads[0].Bucket,'fixture-bucket');assert.equal(fixture.uploads[0].Key,'reviewed/a & + # ü.txt');
+});
+
+
+test('a delayed status refresh cannot close or overwrite a newer upload draft',async()=>{
+ const {document,fixture}=await modelFixture(),get=id=>document.getElementById(id);get('upload').click();await settle();
+ pickUpload(document,'upload-file-input',[{name:'first.txt',size:1}]);
+ let release;fixture.onTransfers=()=>new Promise(resolve=>release=resolve);
+ const previous=get('upload-form').onsubmit({preventDefault(){}});await settle();
+ assert.equal(get('upload-dialog').open,false,'completed draft finalizes before polling');
+ get('upload').click();await settle();pickUpload(document,'upload-file-input',[{name:'new-draft.txt',size:2}]);
+ release();await previous;
+ assert.equal(get('upload-dialog').open,true);assert.equal(get('upload-rows').children.length,1);assert.match(get('upload-rows').textContent,/new-draft.txt/);assert.equal(get('upload-confirm').disabled,false);
 });
