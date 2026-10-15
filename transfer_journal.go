@@ -288,7 +288,12 @@ func (c *cleanupUploadClient) CreateMultipartUpload(ctx context.Context, in *s3.
 		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		defer cancel()
 		_, abortErr := c.Client.AbortMultipartUpload(cleanupCtx, &s3.AbortMultipartUploadInput{Bucket: in.Bucket, Key: in.Key, UploadId: out.UploadId})
-		return nil, errors.Join(err, abortErr)
+		if abortErr != nil {
+			c.abortErr = abortErr
+			persistErr := c.app.retainMultipart(c.transfer, aws.ToString(out.UploadId), c.scope)
+			return nil, errors.Join(err, abortErr, persistErr)
+		}
+		return nil, err
 	}
 	return out, nil
 }
@@ -317,4 +322,19 @@ func (a *App) setPartial(t Transfer, path string) error {
 		return err
 	}
 	return nil
+}
+
+// If both the initial checkpoint and its fallback abort fail, retain ownership
+// in memory even while storage is unavailable. No parts are sent; subsequent
+// checkpoints, restart recovery, or Retry can retire the exact upload ID.
+func (a *App) retainMultipart(t Transfer, uploadID, scope string) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	current := a.transfers[t.ID]
+	if current == nil || current.attempt != t.attempt {
+		return errors.New("Transfer attempt changed")
+	}
+	current.multipartID, current.multipartScope = uploadID, scope
+	current.CleanupError = "Remote multipart cleanup pending; Retry when the connection is available."
+	return a.persistTransferLocked(current)
 }

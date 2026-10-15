@@ -680,22 +680,38 @@ func (a *App) CancelTransfer(id string) {
 		}
 	}
 }
-func (a *App) RetryTransfer(id string) error {
-	a.mu.Lock()
+func (a *App) retryErrorLocked(id string) error {
 	if a.closing {
-		a.mu.Unlock()
-		return errors.New("Application is shutting down")
+		return errShuttingDown
 	}
 	t := a.transfers[id]
 	if t == nil || (t.Status != "failed" && t.Status != "cancelled") {
-		a.mu.Unlock()
 		return errors.New("Only failed or cancelled transfers can be retried")
 	}
+	return nil
+}
+func (a *App) RetryTransfer(id string) error {
+	// Reject invalid requests without waiting for a vault operation. Admission
+	// itself is serialized with profile deletion and rechecked under both locks.
+	a.mu.Lock()
+	preflight := a.retryErrorLocked(id)
+	a.mu.Unlock()
+	if preflight != nil {
+		return preflight
+	}
+	a.profileMu.Lock()
+	defer a.profileMu.Unlock()
+	a.mu.Lock()
+	if err := a.retryErrorLocked(id); err != nil {
+		a.mu.Unlock()
+		return err
+	}
+	t := a.transfers[id]
 	if err := a.removePartial(t); err != nil {
 		a.mu.Unlock()
 		return err
 	}
-	if t.Direction == "upload" {
+	if t.Direction == "upload" && t.multipartID == "" {
 		if _, err := os.Stat(t.Path); err != nil {
 			a.mu.Unlock()
 			return errors.New("Staged upload unavailable; choose the local file again")
@@ -842,7 +858,7 @@ func (a *App) execute(ctx context.Context, t Transfer) error {
 	if t.Direction == "upload" {
 		f, e := os.Open(t.Path)
 		if e != nil {
-			return e
+			return fmt.Errorf("Staged upload unavailable; choose the local file again: %w", e)
 		}
 		defer f.Close()
 		st, e := f.Stat()
@@ -1001,6 +1017,20 @@ func (a *App) DeleteProfile(profileID string) error {
 			return errors.New("Wait for this connection’s transfers to finish or cancel them before deleting it")
 		}
 	}
+	if a.journalEnabled {
+		for _, t := range a.transfers {
+			if t.ProfileID == profileID {
+				if err := a.removePartial(t); err != nil {
+					a.mu.Unlock()
+					return fmt.Errorf("Connection retained because local cleanup failed: %w", err)
+				}
+				if err := a.persistTransferLocked(t); err != nil {
+					a.mu.Unlock()
+					return err
+				}
+			}
+		}
+	}
 	a.mu.Unlock()
 	db, err := a.openStore()
 	if err != nil {
@@ -1035,8 +1065,9 @@ func (a *App) DeleteProfile(profileID string) error {
 		a.mu.Lock()
 		for tid, t := range a.transfers {
 			if t.ProfileID == profileID {
-				_ = a.removePartial(t)
-				_ = os.Remove(t.Path)
+				if err := os.Remove(t.Path); err != nil && !os.IsNotExist(err) {
+					log.Printf("Unused transfer cache cleanup remains pending until restart: %v", err)
+				}
 				delete(a.transfers, tid)
 			}
 		}
