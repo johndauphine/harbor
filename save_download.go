@@ -73,6 +73,9 @@ func (a *App) SaveDownload(ctx context.Context, id, directory, name string, over
 				t.SavedPath = result.Path
 				t.SavedAt = time.Now()
 			}
+			if err := a.persistTransferLocked(t); err != nil {
+				saveErr = errors.Join(saveErr, err)
+			}
 		}
 	}()
 	if name == "" || name == "." || name == ".." || strings.ContainsAny(name, "/\\\x00") || !filepath.IsAbs(directory) {
@@ -230,11 +233,10 @@ func (a *App) QueueLocalUpload(ctx context.Context, profile, bucket, key, path s
 		return "", err
 	}
 	defer source.Close()
-	dir, err := os.UserCacheDir()
+	dir, err := a.transferCacheDir()
 	if err != nil {
 		return "", err
 	}
-	dir = filepath.Join(dir, "HarborS3")
 	if err = os.MkdirAll(dir, 0700); err != nil {
 		return "", err
 	}
@@ -244,15 +246,18 @@ func (a *App) QueueLocalUpload(ctx context.Context, profile, bucket, key, path s
 	}
 	stagedPath := staged.Name()
 	n, copyErr := io.Copy(staged, io.LimitReader(contextReader{ctx, source}, limit+1))
+	if copyErr == nil {
+		copyErr = staged.Sync()
+	}
 	closeErr := staged.Close()
 	if copyErr != nil || closeErr != nil || n > limit {
 		os.Remove(stagedPath)
 		return "", errors.New("Could not stage upload; check file access and the 5 GiB limit")
 	}
-	transferID := a.queue("upload", profile, bucket, key, stagedPath)
-	if transferID == "" {
+	transferID, err := a.queueTransfer("upload", profile, bucket, key, stagedPath)
+	if err != nil {
 		os.Remove(stagedPath)
-		return "", errShuttingDown
+		return "", err
 	}
 	return transferID, nil
 }

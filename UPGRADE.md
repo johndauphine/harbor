@@ -19,6 +19,16 @@ When you replace credentials, Harbor writes a new vault entry and commits its pr
 
 Malformed or unreadable configuration now stops startup with an error instead of silently displaying an empty or partial connection list. Preserve the database for recovery; do not assume the missing list means your settings were deleted. Restore a known valid configuration backup at its original location, with every Harbor process stopped, or choose a new empty database with `--db` and recreate the connections.
 
+## Transfer recovery after upgrading
+
+New transfers are journaled in the settings database. A private directory named `<database>.transfers` beside that database holds staged upload data and cached downloads. Keep this directory together with an offline database backup if you need its retryable uploads. Opening the same database after a crash restores interrupted transfers as failed, with Retry available; normal shutdown preserves cancelled transfers too. Retries restart from the beginning and keep the original download destination and overwrite decision. They never start automatically.
+
+Startup removes recorded partial downloads and unreferenced staging files owned by this database. Retryable upload bodies remain until their transfer succeeds or the connection is deleted. Harbor records each multipart upload ID before sending parts and attempts to abort that exact upload on restart or before Retry. If the server or credential vault is unavailable, or the connection settings have changed, cleanup remains pending and is shown in Transfers. Restore access and the original connection settings, then Retry. A connection cannot be deleted while its recorded multipart cleanup is pending.
+
+Transfers interrupted in older builds cannot be reconstructed because those builds did not journal their history or multipart IDs. Do not delete shared legacy cache files while another Harbor instance may be using them. Provider lifecycle rules can clean up incomplete multipart uploads that were never journaled, including a crash between server-side initiation and recording its response.
+
+Downgrading while recoverable transfers exist is unsupported: older executables neither restore this journal nor protect its staged files. Finish or discard that work before switching versions.
+
 ## Backups, moving computers and returning to an older build
 
 **Restoring a database does not restore its credentials.** Credential rotation may have removed the vault entry referenced by an older backup. The restored connection can appear in Harbor but fail authentication. Edit it and enter a complete access key and secret key, plus a session token if required. Partial key replacement needs the previous vault entry and cannot repair a missing one.

@@ -15,6 +15,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/smithy-go"
 	"github.com/zalando/go-keyring"
 	"io"
 	"log"
@@ -63,42 +64,48 @@ type downloadTarget struct {
 }
 
 type Transfer struct {
-	attempt     uint64
-	destination *downloadTarget
-	ID          string
-	Direction   string
-	Key         string
-	Path        string
-	ProfileID   string
-	Bucket      string
-	Done        int64
-	Total       int64
-	Status      string
-	Error       string
-	CreatedAt   time.Time
-	SavedAt     time.Time
-	SavedPath   string
-	SaveError   string
-	cancel      context.CancelFunc
+	multipartID    string
+	multipartScope string
+	partialPath    string
+	CleanupError   string
+	attempt        uint64
+	destination    *downloadTarget
+	ID             string
+	Direction      string
+	Key            string
+	Path           string
+	ProfileID      string
+	Bucket         string
+	Done           int64
+	Total          int64
+	Status         string
+	Error          string
+	CreatedAt      time.Time
+	SavedAt        time.Time
+	SavedPath      string
+	SaveError      string
+	cancel         context.CancelFunc
 }
 type App struct {
-	ctx           context.Context
-	appCancel     context.CancelFunc
-	mu            sync.Mutex
-	profileMu     sync.Mutex
-	closing       bool
-	workers       sync.WaitGroup
-	operations    map[string]context.CancelFunc
-	shutdownDone  chan struct{}
-	profiles      []Profile
-	transfers     map[string]*Transfer
-	transferOrder []string
-	saveMu        sync.Mutex
-	configFile    string
-	secretGet     func(string) (string, error)
-	secretSet     func(string, string) error
-	secretDelete  func(string) error
-	profileCommit func(*sql.Tx) error
+	journalEnabled bool
+	transferCache  string
+	ctx            context.Context
+	appCancel      context.CancelFunc
+	mu             sync.Mutex
+	profileMu      sync.Mutex
+	closing        bool
+	workers        sync.WaitGroup
+	operations     map[string]context.CancelFunc
+	shutdownDone   chan struct{}
+	profiles       []Profile
+	transfers      map[string]*Transfer
+	transferOrder  []string
+	saveMu         sync.Mutex
+	configFile     string
+	secretGet      func(string) (string, error)
+	secretSet      func(string, string) error
+	secretDelete   func(string) error
+	profileCommit  func(*sql.Tx) error
 }
 
 func NewApp() *App {
@@ -177,12 +184,12 @@ func (a *App) startup(ctx context.Context) (startupErr error) {
 		return fmt.Errorf("Close saved connection query: %w", err)
 	}
 	a.profileMu.Lock()
-	defer a.profileMu.Unlock()
 	a.profiles = loaded
 	if err = a.cleanupCredentials(db); err != nil {
 		log.Print("Unused credential cleanup remains pending; unlock the credential vault and restart Harbor to retry")
 	}
-	return nil
+	a.profileMu.Unlock()
+	return a.recoverTransfers(db)
 }
 
 var errShuttingDown = errors.New("Application is shutting down")
@@ -247,6 +254,12 @@ func (a *App) shutdown(ctx context.Context) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	var cleanupErr error
+	if a.journalEnabled {
+		for _, t := range a.transfers {
+			cleanupErr = errors.Join(cleanupErr, a.persistTransferLocked(t))
+		}
+		return cleanupErr
+	}
 	for _, t := range a.transfers {
 		if t.Path != "" {
 			if err := os.Remove(t.Path); err != nil && !os.IsNotExist(err) {
@@ -593,21 +606,31 @@ func (a *App) QueueDownload(profile, bucket, key string, target ...downloadTarge
 	if _, e := a.client(a.ctx, profile); e != nil {
 		return "", e
 	}
-	dir, e := os.UserCacheDir()
+	dir, e := a.transferCacheDir()
 	if e != nil {
 		return "", e
 	}
-	dir = filepath.Join(dir, "HarborS3")
-	if e = os.MkdirAll(dir, 0700); e != nil {
-		return "", e
-	}
-	transferID := a.queue("download", profile, bucket, key, filepath.Join(dir, "download-"+id()), target...)
-	if transferID == "" {
-		return "", errShuttingDown
-	}
-	return transferID, nil
+	return a.queueTransfer("download", profile, bucket, key, filepath.Join(dir, "download-"+id()), target...)
 }
 func (a *App) queue(direction, profile, bucket, key, path string, target ...downloadTarget) string {
+	transferID, _ := a.queueTransfer(direction, profile, bucket, key, path, target...)
+	return transferID
+}
+func (a *App) queueTransfer(direction, profile, bucket, key, path string, target ...downloadTarget) (string, error) {
+	if a.journalEnabled {
+		a.profileMu.Lock()
+		defer a.profileMu.Unlock()
+		found := false
+		for _, p := range a.profiles {
+			if p.ID == profile {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return "", errors.New("Connection no longer exists")
+		}
+	}
 	t := &Transfer{attempt: 1, ID: id(), Direction: direction, ProfileID: profile, Bucket: bucket, Key: key, Path: path, Status: "queued", CreatedAt: time.Now()}
 	if len(target) > 0 {
 		t.destination = &target[0]
@@ -615,7 +638,11 @@ func (a *App) queue(direction, profile, bucket, key, path string, target ...down
 	a.mu.Lock()
 	if a.closing {
 		a.mu.Unlock()
-		return ""
+		return "", errShuttingDown
+	}
+	if err := a.persistTransferLocked(t); err != nil {
+		a.mu.Unlock()
+		return "", err
 	}
 	a.transfers[t.ID] = t
 	a.transferOrder = append(a.transferOrder, t.ID)
@@ -625,7 +652,7 @@ func (a *App) queue(direction, profile, bucket, key, path string, target ...down
 		defer a.workers.Done()
 		a.run(t.ID, 1)
 	}()
-	return t.ID
+	return t.ID, nil
 }
 func (a *App) Transfers() []Transfer {
 	a.mu.Lock()
@@ -646,25 +673,61 @@ func (a *App) CancelTransfer(id string) {
 			t.cancel()
 		} else if t.Status == "queued" {
 			t.Status = "cancelled"
+			if err := a.persistTransferLocked(t); err != nil {
+				t.Status = "failed"
+				t.Error = err.Error()
+			}
 		}
 	}
 }
-func (a *App) RetryTransfer(id string) error {
-	a.mu.Lock()
+func (a *App) retryErrorLocked(id string) error {
 	if a.closing {
-		a.mu.Unlock()
-		return errors.New("Application is shutting down")
+		return errShuttingDown
 	}
 	t := a.transfers[id]
 	if t == nil || (t.Status != "failed" && t.Status != "cancelled") {
-		a.mu.Unlock()
 		return errors.New("Only failed or cancelled transfers can be retried")
 	}
+	return nil
+}
+func (a *App) RetryTransfer(id string) error {
+	// Reject invalid requests without waiting for a vault operation. Admission
+	// itself is serialized with profile deletion and rechecked under both locks.
+	a.mu.Lock()
+	preflight := a.retryErrorLocked(id)
+	a.mu.Unlock()
+	if preflight != nil {
+		return preflight
+	}
+	a.profileMu.Lock()
+	defer a.profileMu.Unlock()
+	a.mu.Lock()
+	if err := a.retryErrorLocked(id); err != nil {
+		a.mu.Unlock()
+		return err
+	}
+	t := a.transfers[id]
+	if err := a.removePartial(t); err != nil {
+		a.mu.Unlock()
+		return err
+	}
+	if t.Direction == "upload" && t.multipartID == "" {
+		if _, err := os.Stat(t.Path); err != nil {
+			a.mu.Unlock()
+			return errors.New("Staged upload unavailable; choose the local file again")
+		}
+	}
+	previous := *t
 	t.attempt++
 	attempt := t.attempt
 	t.Status = "queued"
 	t.Done = 0
 	t.Error = ""
+	if err := a.persistTransferLocked(t); err != nil {
+		*t = previous
+		a.mu.Unlock()
+		return err
+	}
 	a.workers.Add(1)
 	a.mu.Unlock()
 	go func() {
@@ -696,6 +759,13 @@ func (a *App) run(id string, attempt uint64) {
 	}
 	t.cancel = cancel
 	t.Status = "running"
+	if err := a.persistTransferLocked(t); err != nil {
+		t.Status = "failed"
+		t.Error = err.Error()
+		t.cancel = nil
+		a.mu.Unlock()
+		return
+	}
 	spec := *t
 	a.mu.Unlock()
 	err := a.execute(ctx, spec)
@@ -721,9 +791,15 @@ func (a *App) run(id string, attempt uint64) {
 			t.SavedAt = time.Now()
 			t.SaveError = ""
 		}
-		if t.Direction == "upload" {
-			_ = os.Remove(t.Path)
-		}
+	}
+	if persistErr := a.persistTransferLocked(t); persistErr != nil {
+		t.Status = "failed"
+		t.Error = persistErr.Error()
+		log.Print(persistErr)
+		return
+	}
+	if err == nil && t.Direction == "upload" {
+		_ = os.Remove(t.Path)
 	}
 }
 
@@ -731,6 +807,9 @@ func (a *App) run(id string, attempt uint64) {
 // The SDK otherwise reuses the cancelled context and silently leaves remote parts.
 type cleanupUploadClient struct {
 	*s3.Client
+	app      *App
+	transfer Transfer
+	scope    string
 	abortErr error
 }
 type multipartCleanupError struct{}
@@ -743,11 +822,21 @@ func (c *cleanupUploadClient) AbortMultipartUpload(ctx context.Context, in *s3.A
 	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
 	out, err := c.Client.AbortMultipartUpload(cleanupCtx, in, opts...)
+	var apiErr smithy.APIError
+	if errors.As(err, &apiErr) && apiErr.ErrorCode() == "NoSuchUpload" {
+		err = nil
+	}
+	if err == nil && c.app != nil {
+		err = c.app.setMultipart(c.transfer, "", "")
+	}
 	c.abortErr = err
 	return out, err
 }
 
 func (a *App) execute(ctx context.Context, t Transfer) error {
+	if err := a.prepareTransfer(ctx, t); err != nil {
+		return err
+	}
 	c, e := a.client(ctx, t.ProfileID)
 	if e != nil {
 		return e
@@ -769,7 +858,7 @@ func (a *App) execute(ctx context.Context, t Transfer) error {
 	if t.Direction == "upload" {
 		f, e := os.Open(t.Path)
 		if e != nil {
-			return e
+			return fmt.Errorf("Staged upload unavailable; choose the local file again: %w", e)
 		}
 		defer f.Close()
 		st, e := f.Stat()
@@ -778,6 +867,11 @@ func (a *App) execute(ctx context.Context, t Transfer) error {
 		}
 		total(st.Size())
 		uploadClient := &cleanupUploadClient{Client: c}
+		if a.journalEnabled {
+			uploadClient.app = a
+			uploadClient.transfer = t
+			uploadClient.scope = multipartClientScope(c)
+		}
 		_, e = manager.NewUploader(uploadClient).Upload(ctx, &s3.PutObjectInput{Bucket: aws.String(t.Bucket), Key: aws.String(t.Key), Body: &progressReader{Reader: f, update: update}})
 		if uploadClient.abortErr != nil {
 			return &multipartCleanupError{}
@@ -794,12 +888,30 @@ func (a *App) execute(ctx context.Context, t Transfer) error {
 	if t.destination != nil {
 		directory = filepath.Dir(t.destination.Path)
 	}
-	f, e := os.CreateTemp(directory, ".harbor-download-*")
-	if e != nil {
-		return e
+	var f *os.File
+	var tmp string
+	if a.journalEnabled {
+		tmp = a.partialDownloadPath(t)
+		if e = a.setPartial(t, tmp); e != nil {
+			return e
+		}
+		f, e = os.OpenFile(tmp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+		if e != nil {
+			_ = a.setPartial(t, "")
+			return e
+		}
+	} else {
+		f, e = os.CreateTemp(directory, ".harbor-download-*")
+		if e != nil {
+			return e
+		}
+		tmp = f.Name()
 	}
-	tmp := f.Name()
-	defer os.Remove(tmp)
+	defer func() {
+		if err := os.Remove(tmp); err == nil || os.IsNotExist(err) {
+			_ = a.setPartial(t, "")
+		}
+	}()
 	_, e = io.Copy(f, &progressReader{Reader: v.Body, update: update})
 	if e == nil {
 		e = f.Sync()
@@ -896,9 +1008,27 @@ func (a *App) DeleteProfile(profileID string) error {
 	}
 	a.mu.Lock()
 	for _, t := range a.transfers {
+		if t.ProfileID == profileID && t.multipartID != "" {
+			a.mu.Unlock()
+			return errors.New("Retry this connection’s pending multipart cleanup before deleting it")
+		}
 		if t.ProfileID == profileID && (t.Status == "running" || t.Status == "queued") {
 			a.mu.Unlock()
 			return errors.New("Wait for this connection’s transfers to finish or cancel them before deleting it")
+		}
+	}
+	if a.journalEnabled {
+		for _, t := range a.transfers {
+			if t.ProfileID == profileID {
+				if err := a.removePartial(t); err != nil {
+					a.mu.Unlock()
+					return fmt.Errorf("Connection retained because local cleanup failed: %w", err)
+				}
+				if err := a.persistTransferLocked(t); err != nil {
+					a.mu.Unlock()
+					return err
+				}
+			}
 		}
 	}
 	a.mu.Unlock()
@@ -915,6 +1045,11 @@ func (a *App) DeleteProfile(profileID string) error {
 	if _, err = tx.Exec("DELETE FROM profiles WHERE id=?", profileID); err != nil {
 		return err
 	}
+	if a.journalEnabled {
+		if _, err = tx.Exec("DELETE FROM transfers WHERE profile_id=?", profileID); err != nil {
+			return err
+		}
+	}
 	ref := credentialID(a.profiles[index])
 	if _, err = tx.Exec("DELETE FROM profile_credentials WHERE profile_id=?", profileID); err != nil {
 		return err
@@ -926,6 +1061,18 @@ func (a *App) DeleteProfile(profileID string) error {
 		return err
 	}
 	a.profiles = append(a.profiles[:index], a.profiles[index+1:]...)
+	if a.journalEnabled {
+		a.mu.Lock()
+		for tid, t := range a.transfers {
+			if t.ProfileID == profileID {
+				if err := os.Remove(t.Path); err != nil && !os.IsNotExist(err) {
+					log.Printf("Unused transfer cache cleanup remains pending until restart: %v", err)
+				}
+				delete(a.transfers, tid)
+			}
+		}
+		a.mu.Unlock()
+	}
 	if err = a.cleanupCredentials(db); err != nil {
 		return &credentialCleanupError{Operation: "deleted"}
 	}
