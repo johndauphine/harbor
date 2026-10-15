@@ -87,25 +87,28 @@ type Transfer struct {
 	cancel         context.CancelFunc
 }
 type App struct {
-	journalEnabled bool
-	transferCache  string
-	ctx            context.Context
-	appCancel      context.CancelFunc
-	mu             sync.Mutex
-	profileMu      sync.Mutex
-	closing        bool
-	workers        sync.WaitGroup
-	operations     map[string]context.CancelFunc
-	shutdownDone   chan struct{}
-	profiles       []Profile
-	transfers      map[string]*Transfer
-	transferOrder  []string
-	saveMu         sync.Mutex
-	configFile     string
-	secretGet      func(string) (string, error)
-	secretSet      func(string, string) error
-	secretDelete   func(string) error
-	profileCommit  func(*sql.Tx) error
+	journalEnabled   bool
+	transferCache    string
+	ctx              context.Context
+	appCancel        context.CancelFunc
+	mu               sync.Mutex
+	profileMu        sync.Mutex
+	closing          bool
+	workers          sync.WaitGroup
+	operations       map[string]context.CancelFunc
+	shutdownDone     chan struct{}
+	profiles         []Profile
+	transfers        map[string]*Transfer
+	transferOrder    []string
+	deletePlans      map[string]*deletePlan
+	activeDeletes    map[string]*deletePlan
+	storageMutations map[string]storageMutation
+	saveMu           sync.Mutex
+	configFile       string
+	secretGet        func(string) (string, error)
+	secretSet        func(string, string) error
+	secretDelete     func(string) error
+	profileCommit    func(*sql.Tx) error
 }
 
 func NewApp() *App {
@@ -369,6 +372,9 @@ func (a *App) SaveProfile(p Profile, secret Secret) (Profile, error) {
 	}
 	a.profileMu.Lock()
 	defer a.profileMu.Unlock()
+	if a.profileDeletionActive(p.ID) {
+		return Profile{}, errors.New("Deletion is running for this connection; wait before editing it")
+	}
 	var previous Profile
 	for _, saved := range a.profiles {
 		if saved.ID == p.ID {
@@ -640,6 +646,10 @@ func (a *App) queueTransfer(direction, profile, bucket, key, path string, target
 		a.mu.Unlock()
 		return "", errShuttingDown
 	}
+	if a.deletionBlockedLocked(profile, bucket, key) {
+		a.mu.Unlock()
+		return "", errors.New("Deletion is running in this scope; wait before starting a transfer")
+	}
 	if err := a.persistTransferLocked(t); err != nil {
 		a.mu.Unlock()
 		return "", err
@@ -685,6 +695,9 @@ func (a *App) retryErrorLocked(id string) error {
 		return errShuttingDown
 	}
 	t := a.transfers[id]
+	if t != nil && a.deletionBlockedLocked(t.ProfileID, t.Bucket, t.Key) {
+		return errors.New("Deletion is running in this scope; wait before retrying")
+	}
 	if t == nil || (t.Status != "failed" && t.Status != "cancelled") {
 		return errors.New("Only failed or cancelled transfers can be retried")
 	}
@@ -951,6 +964,11 @@ func (a *App) CreateFolder(profile, bucket, prefix, name string) (string, error)
 	if len(key) > 1024 {
 		return "", errors.New("Folder path is too long")
 	}
+	releaseMutation, err := a.beginStorageMutation(profile, bucket, key)
+	if err != nil {
+		return "", err
+	}
+	defer releaseMutation()
 	ctx, cancel := context.WithTimeout(a.ctx, 30*time.Second)
 	defer cancel()
 	c, err := a.client(ctx, profile)
@@ -972,6 +990,11 @@ func (a *App) DeleteFile(profile, bucket, key, etag string) (string, error) {
 	if etag == "" || etag == "*" {
 		return "", errors.New("Refresh the listing and select the file again")
 	}
+	releaseMutation, err := a.beginStorageMutation(profile, bucket, key)
+	if err != nil {
+		return "", err
+	}
+	defer releaseMutation()
 	ctx, cancel := context.WithTimeout(a.ctx, 30*time.Second)
 	defer cancel()
 	c, err := a.client(ctx, profile)
@@ -996,6 +1019,9 @@ func (a *App) DeleteFile(profile, bucket, key, etag string) (string, error) {
 func (a *App) DeleteProfile(profileID string) error {
 	a.profileMu.Lock()
 	defer a.profileMu.Unlock()
+	if a.profileDeletionActive(profileID) {
+		return errors.New("Deletion is running for this connection; wait before deleting it")
+	}
 	index := -1
 	for i, p := range a.profiles {
 		if p.ID == profileID {
@@ -1091,6 +1117,11 @@ func (a *App) DeleteBucket(profileID, bucket string) error {
 		}
 	}
 	a.mu.Unlock()
+	releaseMutation, err := a.beginStorageMutation(profileID, bucket, "")
+	if err != nil {
+		return err
+	}
+	defer releaseMutation()
 	ctx, cancel := context.WithTimeout(a.ctx, 30*time.Second)
 	defer cancel()
 	c, err := a.client(ctx, profileID)

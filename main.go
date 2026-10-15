@@ -202,6 +202,8 @@ func webHandler(a *App, host, token string) http.Handler {
 			Path         string
 			Name         string
 			Confirmation string
+			Kind         string
+			PlanID       string
 			Overwrite    bool
 		}
 		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
@@ -215,6 +217,10 @@ func webHandler(a *App, host, token string) http.Handler {
 			value = a.Profiles()
 		case "/api/save":
 			value, err = a.SaveProfile(in.Profile, in.Secret)
+		case "/api/preview-delete":
+			value, err = a.PreviewDelete(r.Context(), in.ProfileID, in.Bucket, in.Prefix, in.Kind)
+		case "/api/execute-delete":
+			value, err = a.ExecuteDelete(r.Context(), in.PlanID, in.Confirmation)
 		case "/api/delete-bucket":
 			if in.Bucket == "" || in.Confirmation != in.Bucket {
 				err = fmt.Errorf("Type the exact bucket name to confirm deletion")

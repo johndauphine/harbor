@@ -73,10 +73,10 @@ test('batch download queues each file once and retains only failed files for ret
 });
 test('batch delete cancel makes no requests; partial failure remains selected',async()=>{
  const h=await setup();let files=[{Key:'a',Size:1,ETag:'a-tag'},{Key:'b',Size:2,ETag:'b-tag'}];h.setResponder(async()=>({Objects:files,Next:''}));await h.get('refresh').click();h.get('select-all').click();
- let confirmed=false,prompt='';h.context.confirm=text=>{prompt=text;return confirmed};const original=h.context.fetch,calls=[];
+ const original=h.context.fetch,calls=[];
  h.context.fetch=async(url,options)=>{if(!url.endsWith('/delete-file'))return original(url,options);const data=JSON.parse(options.body);calls.push(data);if(data.Key==='b')return{ok:false,json:async()=>({error:'Access denied'})};files=files.filter(f=>f.Key!==data.Key);return{ok:true,json:async()=>data.Key}};
- await h.get('delete').click();assert.equal(calls.length,0);assert.match(prompt,/bucket-a\/a/);assert.match(prompt,/bucket-a\/b/);
- confirmed=true;await h.get('delete').click();assert.equal(calls.length,2);assert.equal(calls[0].ETag,'a-tag');assert.match(h.get('message').textContent,/Deleted 1 file.*Failed: b: Access denied/);assert.equal(h.get('selection-count').textContent,'1 file selected');assert.match(h.get('details').textContent,/Selected: b/);
+ await h.get('delete').click();assert.equal(calls.length,0);assert.match(h.get('delete-targets').textContent,/bucket-a\/a/);assert.match(h.get('delete-targets').textContent,/bucket-a\/b/);h.get('delete-cancel').click();
+ await h.get('delete').click();h.get('delete-confirmation').value='DELETE';await h.get('delete-form').onsubmit({preventDefault(){}});assert.equal(calls.length,2);assert.equal(calls[0].ETag,'a-tag');assert.match(h.get('message').textContent,/Deleted 1 file.*Failed: b: Access denied/);assert.equal(h.get('selection-count').textContent,'1 file selected');assert.match(h.get('details').textContent,/Selected: b/);
 });
 
 test('path completion fills folder and file names without navigating or selecting',async()=>{
@@ -129,15 +129,16 @@ test('connection menus target their own connection; delete cancel sends no reque
  let prompt='';h.context.confirm=text=>{prompt=text;return false};await choices.children[1].click();assert.match(prompt,/Two/);assert.match(prompt,/Buckets and files will not be deleted/);assert.equal(h.get('profiles').children.length,2);
 });
 
-test('bucket menu delete names the intended bucket and cancel preserves it',async()=>{
- const h=await setup();let text='';h.context.prompt=value=>{text=value;return null};await h.get('buckets').children[1].children[1].children[1].children[0].click();assert.match(text,/bucket-b/);assert.match(text,/must contain no objects/);assert.equal(h.get('buckets').children.length,2);
+test('bucket menu previews its intended scope and cancel preserves all data',async()=>{
+ const h=await setup(),original=h.context.fetch,requests=[];
+ h.context.fetch=async(url,options)=>{if(url.endsWith('/preview-delete')){requests.push(JSON.parse(options.body));return{ok:true,json:async()=>({PlanID:'plan-b',Confirmation:'bucket-b',Objects:2,Versions:1,DeleteMarkers:0,MultipartUploads:0,TotalBytes:4,Keys:['a','b']})}}return original(url,options)};
+ await h.get('buckets').children[1].children[1].children[1].children[0].click();assert.equal(requests[0].Bucket,'bucket-b');assert.match(h.get('delete-context').textContent,/bucket-b/);assert.equal(h.get('delete-confirm').disabled,true);h.get('delete-cancel').click();assert.equal(h.get('delete-dialog').open,false);assert.equal(h.get('buckets').children.length,2);
 });
-
-test('bucket deletion requires the exact name and sends matching confirmation',async()=>{
- const h=await setup();let requests=[];const original=h.context.fetch;
- h.context.fetch=async(url,options)=>{if(url.endsWith('/delete-bucket')){requests.push(JSON.parse(options.body));return {ok:true,json:async()=> 'deleted'}}return original(url,options)};
- h.context.prompt=()=> 'wrong';await h.context.deleteBucket('one','bucket-b');assert.equal(requests.length,0);assert.match(h.get('message').textContent,/did not match/);
- h.context.prompt=()=> 'bucket-b';await h.context.deleteBucket('one','bucket-b');assert.equal(requests.length,1);assert.equal(requests[0].Confirmation,'bucket-b');assert.equal(requests[0].Bucket,'bucket-b');
+test('bucket deletion requires exact typed name and executes only the bound preview token',async()=>{
+ const h=await setup(),original=h.context.fetch,requests=[];
+ h.context.fetch=async(url,options)=>{if(url.endsWith('/preview-delete'))return{ok:true,json:async()=>({PlanID:'plan-b',Confirmation:'bucket-b',Objects:0,Versions:0,DeleteMarkers:0,MultipartUploads:0,TotalBytes:0,Keys:[]})};if(url.endsWith('/execute-delete')){requests.push(JSON.parse(options.body));return{ok:true,json:async()=>({Deleted:0,Aborted:0,Failures:[],Completed:true,BucketDeleted:true})}}return original(url,options)};
+ await h.context.deleteBucket('one','bucket-b');h.get('delete-confirmation').value='wrong';await h.get('delete-form').onsubmit({preventDefault(){}});assert.equal(requests.length,0);
+ h.get('delete-confirmation').value='bucket-b';await h.get('delete-form').onsubmit({preventDefault(){}});assert.equal(requests.length,1);assert.deepEqual(requests[0],{PlanID:'plan-b',Confirmation:'bucket-b'});
 });
 
 test('credential masks are never submitted and typing replaces only the edited key',async()=>{
