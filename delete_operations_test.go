@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -29,6 +30,7 @@ type deleteFixture struct {
 	beforeDelete  func(*deleteFixture)
 	deleting      chan struct{}
 	release       chan struct{}
+	versioning    string
 	bucketDeleted bool
 }
 
@@ -56,6 +58,10 @@ func (f *deleteFixture) serve(w http.ResponseWriter, r *http.Request) {
 	f.calls = append(f.calls, r.Method+" "+r.URL.RequestURI())
 	q := r.URL.Query()
 	key := strings.TrimPrefix(r.URL.Path, "/bucket/")
+	if r.Method == "GET" && q.Has("versioning") {
+		fmt.Fprintf(w, "<VersioningConfiguration><Status>%s</Status></VersioningConfiguration>", f.versioning)
+		return
+	}
 	if r.Method == "GET" && q.Has("versions") {
 		if f.failPage && q.Get("key-marker") != "" {
 			w.WriteHeader(403)
@@ -166,13 +172,22 @@ func (f *deleteFixture) serve(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprint(w, `<Error><Code>AccessDenied</Code></Error>`)
 			return
 		}
-		i, ok := f.items[key+"\x00"+q.Get("versionId")]
+		if q.Has("versionId") && r.Header.Get("If-Match") != "" {
+			w.WriteHeader(501)
+			fmt.Fprint(w, `<Error><Code>NotImplemented</Code><Message>Conditional delete operations are not allowed when a version ID is included</Message></Error>`)
+			return
+		}
+		version := q.Get("versionId")
+		if !q.Has("versionId") {
+			version = "null"
+		}
+		i, ok := f.items[key+"\x00"+version]
 		if !ok {
 			w.WriteHeader(404)
 			fmt.Fprint(w, `<Error><Code>NoSuchVersion</Code></Error>`)
 			return
 		}
-		if !i.Marker && r.Header.Get("If-Match") != i.ETag {
+		if !i.Marker && (version == "null" || r.Header.Get("If-Match") != "") && r.Header.Get("If-Match") != i.ETag {
 			w.WriteHeader(412)
 			fmt.Fprint(w, `<Error><Code>PreconditionFailed</Code></Error>`)
 			return
@@ -203,7 +218,7 @@ func setupDeleteFixture(t *testing.T) (*App, *deleteFixture) {
 	return a, f
 }
 func content(key, version string) deleteItem {
-	return deleteItem{Key: key, VersionID: version, ETag: `"etag"`, Size: 12}
+	return deleteItem{Key: key, VersionID: version, ETag: `"etag"`, Size: 12, IsLatest: version == "null"}
 }
 func mustPreview(t *testing.T, a *App, kind, prefix string) DeletePreview {
 	t.Helper()
@@ -523,5 +538,58 @@ func TestDeletePlanPreservesCurrentVersionWhenOlderVersionDeletionFails(t *testi
 		if strings.HasPrefix(call, "DELETE ") && strings.Contains(call, "versionId=a-current") {
 			t.Fatal("current version must not be removed after older version deletion fails")
 		}
+	}
+}
+
+// Match AWS's request boundary, which MinIO does not enforce: If-Match and
+// versionId must never be combined on DELETE, even for versionId=null.
+func TestDeleteAWSConditionalAndVersionRequests(t *testing.T) {
+	a, f := setupDeleteFixture(t)
+	f.put(content("folder/", "null"))
+	f.put(content("folder/nested/", "null"))
+	f.put(content("folder/history", "immutable-version"))
+	p := mustPreview(t, a, "folder", "folder/")
+	r, err := a.ExecuteDelete(context.Background(), p.PlanID, p.Confirmation)
+	if err != nil || !r.Completed || r.Deleted != 3 {
+		t.Fatalf("AWS-compatible request shapes failed: %+v, %v", r, err)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var conditional, versioned bool
+	for _, call := range f.calls {
+		method, raw, _ := strings.Cut(call, " ")
+		u, parseErr := url.Parse(raw)
+		if parseErr != nil || method != "DELETE" {
+			continue
+		}
+		if u.Path == "/bucket/folder/" && !u.Query().Has("versionId") {
+			conditional = true
+		}
+		if u.Path == "/bucket/folder/history" && u.Query().Get("versionId") == "immutable-version" {
+			versioned = true
+		}
+	}
+	if !conditional || !versioned {
+		t.Fatalf("missing ordinary/version-specific DELETE requests: %v", f.calls)
+	}
+}
+
+func TestDeleteAWSMutableNullVersionsRemainProtected(t *testing.T) {
+	for _, status := range []string{"Enabled", "Suspended", "noncurrent"} {
+		t.Run(status, func(t *testing.T) {
+			a, f := setupDeleteFixture(t)
+			i := content("folder/data", "null")
+			if status == "noncurrent" {
+				i.IsLatest = false
+			} else {
+				f.versioning = status
+			}
+			f.put(i)
+			p := mustPreview(t, a, "folder", "folder/")
+			r, err := a.ExecuteDelete(context.Background(), p.PlanID, p.Confirmation)
+			if err != nil || r.Completed || r.Deleted != 0 || len(r.Failures) != 1 || f.countDeletes() != 0 {
+				t.Fatalf("mutable null version was not preserved: %+v, %v", r, err)
+			}
+		})
 	}
 }

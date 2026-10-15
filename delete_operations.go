@@ -420,6 +420,20 @@ func (a *App) ExecuteDelete(ctx context.Context, planID, confirmation string) (D
 		result.Remaining = "Contents changed since review. Nothing was deleted; review the current contents again."
 		return result, nil
 	}
+	// AWS rejects If-Match together with versionId. Ordinary, never-versioned
+	// objects can instead use a conditional DELETE without versionId. Mutable
+	// null versions in enabled/suspended buckets cannot be purged atomically.
+	nullObjectsUnversioned := false
+	for _, item := range p.Items {
+		if !item.Marker && item.UploadID == "" && item.VersionID == "null" {
+			versioning, versionErr := c.GetBucketVersioning(ctx, &s3.GetBucketVersioningInput{Bucket: aws.String(p.Bucket)})
+			if versionErr != nil {
+				return result, fmt.Errorf("Could not verify bucket versioning; nothing deleted: %w", versionErr)
+			}
+			nullObjectsUnversioned = versioning.Status == ""
+			break
+		}
+	}
 	// Remove content before delete markers. A marker must continue hiding any
 	// retained or newly introduced versions when part of an operation fails.
 	ordered := append([]deleteItem(nil), p.Items...)
@@ -472,11 +486,14 @@ func (a *App) ExecuteDelete(ctx context.Context, planID, confirmation string) (D
 			in := &s3.DeleteObjectInput{Bucket: aws.String(p.Bucket), Key: aws.String(item.Key), VersionId: aws.String(item.VersionID)}
 			err = nil
 			if !item.Marker {
-				in.IfMatch = aws.String(item.ETag)
-				if item.VersionID == "null" {
+				if item.VersionID == "null" && (!nullObjectsUnversioned || !item.IsLatest) {
+					err = errors.New("Mutable null version preserved: this bucket has versioning history or the object is not current; AWS cannot conditionally purge this version. Review it in your storage console")
+				} else if item.VersionID == "null" {
+					in.VersionId = nil
+					in.IfMatch = aws.String(item.ETag)
 					// Retain a preflight even for providers that ignore If-Match on
 					// DELETE. They cannot offer atomic protection against external writes.
-					head, headErr := c.HeadObject(ctx, &s3.HeadObjectInput{Bucket: in.Bucket, Key: in.Key, VersionId: in.VersionId, IfMatch: in.IfMatch})
+					head, headErr := c.HeadObject(ctx, &s3.HeadObjectInput{Bucket: in.Bucket, Key: in.Key, VersionId: aws.String(item.VersionID), IfMatch: in.IfMatch})
 					if headErr != nil {
 						err = fmt.Errorf("Could not verify null-version object: %w", headErr)
 					} else if aws.ToString(head.ETag) != item.ETag {
