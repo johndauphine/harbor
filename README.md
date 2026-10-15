@@ -75,6 +75,16 @@ Verified against official MinIO release `RELEASE.2025-10-15T17-29-55Z`, built wi
 
 An opt-in test is available: `HARBOR_MINIO_TEST=1 go test -race -run TestLocalMinIOIntegration -v .`. It requires a saved `MinIO Local` connection pointing to `https://127.0.0.1:59000`, path-style addressing, and its CA certificate. It creates a uniquely named test bucket and retains sample objects for manual browsing. It does not target AWS profiles.
 
+For isolated transfer-interruption checks against a real local MinIO executable, run:
+
+```sh
+HARBOR_MINIO_BINARY=/absolute/path/to/minio go test -race -count=1 -run '^TestMinIOResilience' -v -timeout 8m .
+```
+
+This suite starts disposable MinIO instances with synthetic credentials and temporary storage. A local HTTPS proxy injects dropped multipart connections, truncated downloads and network outages while MinIO handles the actual S3 requests. It checks automatic upload-part retry, upload/download cancellation, MinIO process restart, graceful Harbor shutdown, abrupt Harbor worker termination, and reopening Harbor while storage is still unreachable. Worker processes use Harbor's server, locking, transfer engine and journal with a test credential provider; they do not access the user's credential vault. Each recovered transfer is explicitly retried and checked against the original 17 MiB payload. Tests also verify protection of existing destination files, retention of retryable upload staging, removal of partial downloads, and cleanup of exact owned multipart uploads. Recovery restarts a transfer from the beginning; it does not resume at the previous byte offset.
+
+On 2026-10-15, browser UI checks on macOS 27.0.1 ARM64 also passed against disposable real MinIO storage using the actual Harbor executable and macOS Keychain. A 32 MiB upload recovered through the visible Retry button after a network outage; a download recovered after graceful application shutdown; and uploads and downloads recovered after abrupt application termination. Reopening after the upload crash while storage remained offline preserved the interrupted-transfer message, pending-cleanup warning and Retry control. Uploads used Harbor's file picker, downloads used its Save dialog, and all recovery actions used browser controls. SHA-256 checks matched the source after recovery, existing destination files survived interruption, and owned multipart uploads and partial download files were removed. These local checks do not establish WAN or arbitrary provider behavior.
+
 ## Single-file deletion
 
 Select a file and use Delete file. Confirmation shows its bucket and full key. Harbor checks the current ETag before deletion and sends an If-Match condition. No recursive folder deletion or automatic bucket emptying is implemented. Empty-bucket deletion requires typing the exact bucket name; S3 enforces permissions, versions, and retention restrictions. Versioning and retention rules determine whether a delete marker is created or a file is permanently removed; version management is not yet exposed.
