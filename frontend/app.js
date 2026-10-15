@@ -9,7 +9,7 @@ function updateWorkspace(){
  if(name)name.textContent=owner?.Name||'Storage workspace';
  if(description)description.textContent=owner?(owner.Endpoint||'Amazon S3')+' · '+(owner.Region||'Default region'):'Choose a connection to browse your buckets';
  for(const id of ['upload','new-folder','refresh','go','path','object-search','find-objects','clear-search','up'])$(id).disabled=!bucket||(id==='up'&&!prefix);
- $('test').disabled=!profile;
+ $('test').disabled=!profile;$('new-bucket').disabled=!profile;
 }
 async function selectConnection(p){
  const request=++connectionRequest;browseRequest++;profile=p.ID;bucket='';prefix='';objectFilter='';filterLocation='';$('path').value='';$('object-search').value='';closePathSuggestions();renderBreadcrumbs();clearListing();$('buckets').replaceChildren();message('Loading buckets…');
@@ -289,6 +289,34 @@ function updateSelection(){
 }
 function clearSelection(){selectedKeys.clear();updateSelection()}clearSelection();
 $('select-all').onclick=()=>{if(!currentListing())return;const files=objects.filter(o=>!o.Folder);if(files.length&&files.every(o=>selectedKeys.has(o.Key)))selectedKeys.clear();else for(const o of files)selectedKeys.add(o.Key);updateSelection()};
+
+let bucketTarget=null,bucketCreating=false;
+function validBucketName(name){return /^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/.test(name)&&!name.includes('..')&&!/^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/.test(name)&&!['xn--','sthree-','amzn-s3-demo-'].some(v=>name.startsWith(v))&&!['-s3alias','--ol-s3','.mrap','--x-s3','--table-s3','-an'].some(v=>name.endsWith(v))}
+function updateBucketForm(){
+ $('bucket-confirm').disabled=bucketCreating||!bucketTarget||!validBucketName($('bucket-name').value);
+ $('bucket-cancel').disabled=bucketCreating;$('bucket-name').disabled=bucketCreating;
+ $('bucket-confirm').textContent=bucketCreating?'Creating…':'Create bucket';$('bucket-dialog').setAttribute('aria-busy',String(bucketCreating));
+}
+$('new-bucket').onclick=()=>{
+ if(!profile||bucketCreating)return;const owner=connectionProfiles.find(p=>p.ID===profile);if(!owner)return;
+ bucketTarget={ProfileID:profile,Connection:connectionRequest};$('bucket-context').textContent=owner.Name+' · '+owner.Region+' · '+(owner.Endpoint||'Amazon S3');
+ $('bucket-name').value='';$('bucket-error').textContent='';updateBucketForm();$('bucket-dialog').showModal();$('bucket-name').focus?.();
+};
+$('bucket-name').oninput=updateBucketForm;
+$('bucket-cancel').onclick=()=>{if(!bucketCreating){bucketTarget=null;$('bucket-dialog').close()}};
+$('bucket-dialog').oncancel=e=>{if(bucketCreating)e.preventDefault();else bucketTarget=null};
+$('bucket-form').onsubmit=async e=>{
+ e.preventDefault();if(bucketCreating||!bucketTarget||!validBucketName($('bucket-name').value))return;
+ const target={...bucketTarget},name=$('bucket-name').value;bucketCreating=true;$('bucket-error').textContent='';updateBucketForm();
+ try{
+  await api('create-bucket',{ProfileID:target.ProfileID,Bucket:name});bucketTarget=null;$('bucket-dialog').close();
+  let warning='';if(profile===target.ProfileID&&connectionRequest===target.Connection){
+   try{const names=await api('buckets',{ProfileID:target.ProfileID});if(profile===target.ProfileID&&connectionRequest===target.Connection){bucket=name;prefix='';renderBuckets(names,target.ProfileID);await browse(false,{quiet:true})}}catch(error){warning=' · Created successfully, but listing refresh failed: '+error.message}
+  }
+  message('Created bucket: '+name+warning);
+ }catch(error){$('bucket-error').textContent=error.message}
+ finally{bucketCreating=false;updateBucketForm()}
+};
 
 $('new-folder').onclick=action(async()=>{if(!bucket)throw Error('Choose a bucket first');const target={ProfileID:profile,Bucket:bucket,Prefix:prefix};const name=prompt('Create a folder in '+bucket+'/'+prefix+'\nFolder name:');if(name===null)return;const created=await api('create-folder',{...target,Key:name});if(profile===target.ProfileID&&bucket===target.Bucket&&prefix===target.Prefix)await browse();message('Created folder: '+created)});
 

@@ -187,3 +187,26 @@ test('uncertain recursive deletion result cannot resend a consumed plan',async()
  assert.equal(h.get('delete-title').textContent,'Delete objects: status');assert.equal(h.get('delete-review').hidden,false);assert.match(h.get('delete-error').textContent,/Some items may already have been deleted.*Connection lost/);
  await h.get('delete-form').onsubmit({preventDefault(){}});assert.equal(h.calls('execute-delete').length,1);
 });
+
+test('create bucket validates names, cancels without mutation and opens the created bucket',async()=>{
+ const h=await setup();h.setResponder('create-bucket',req=>req.Bucket);h.setResponder('buckets',()=>['bucket-a','new-bucket']);
+ await h.get('new-bucket').click();assert.equal(h.get('bucket-dialog').open,true);assert.match(h.get('bucket-context').textContent,/One/);
+ for(const name of ['Bad_Name','ab','a..b','127.0.0.1','reserved--x-s3']){h.get('bucket-name').value=name;h.get('bucket-name').oninput();assert.equal(h.get('bucket-confirm').disabled,true);await h.get('bucket-form').onsubmit({preventDefault(){}})}
+ assert.equal(h.calls('create-bucket').length,0);h.get('bucket-cancel').click();assert.equal(h.get('bucket-dialog').open,false);
+ await h.get('new-bucket').click();h.get('bucket-name').value='new-bucket';await h.get('bucket-form').onsubmit({preventDefault(){}});
+ assert.deepEqual(h.calls('create-bucket'),[{ProfileID:'one',Bucket:'new-bucket'}]);assert.equal(h.get('bucket-dialog').open,false);assert.equal(h.get('location').textContent,'new-bucket');assert.equal(h.get('buckets').children.find(row=>row.children[0].textContent==='▱ new-bucket').children[0].attributes['aria-pressed'],'true');assert.match(h.get('message').textContent,/Created bucket: new-bucket/);
+});
+
+test('create bucket isolates navigation, guards duplicate submission and preserves provider errors',async()=>{
+ const h=await setup(),waiting=deferred();h.setResponder('create-bucket',()=>waiting.promise);
+ await h.get('new-bucket').click();h.get('bucket-name').value='new-bucket';const pending=h.get('bucket-form').onsubmit({preventDefault(){}});
+ await h.get('bucket-form').onsubmit({preventDefault(){}});h.get('bucket-cancel').click();assert.equal(h.get('bucket-dialog').open,true);assert.equal(h.calls('create-bucket').length,1);
+ await h.selectConnection('two');waiting.resolve('new-bucket');await pending;assert.equal(h.get('location').textContent,'Choose a bucket');assert.equal(h.calls('create-bucket')[0].ProfileID,'one');
+ h.setResponder('create-bucket',()=>{throw Error('Access denied')});await h.get('new-bucket').click();h.get('bucket-name').value='other-bucket';await h.get('bucket-form').onsubmit({preventDefault(){}});assert.equal(h.get('bucket-dialog').open,true);assert.equal(h.get('bucket-name').value,'other-bucket');assert.match(h.get('bucket-error').textContent,/Access denied/);
+});
+
+test('bucket creation success remains successful when list refresh fails',async()=>{
+ const h=await setup();h.setResponder('create-bucket',req=>req.Bucket);h.setResponder('buckets',()=>{throw Error('List denied')});
+ await h.get('new-bucket').click();h.get('bucket-name').value='new-bucket';await h.get('bucket-form').onsubmit({preventDefault(){}});
+ assert.equal(h.get('bucket-dialog').open,false);assert.match(h.get('message').textContent,/Created bucket: new-bucket.*listing refresh failed/);assert.equal(h.calls('create-bucket').length,1);
+});

@@ -1841,3 +1841,9 @@ button.destructive:hover {
   #appearance { max-width:76px;font-size:11px;padding:5px; }
   .app-header #add { padding:5px 7px;font-size:11px; }
 }
+
+.bucket-section-heading { display:flex; align-items:center; justify-content:space-between; gap:6px; margin-bottom:8px; }
+.bucket-section-heading h2 { margin-bottom:0; }
+#new-bucket { padding:4px 7px; min-height:28px; font-size:11px; }
+#bucket-dialog { width:640px; }
+#bucket-error { color:var(--danger); overflow-wrap:anywhere; }

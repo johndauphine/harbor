@@ -237,6 +237,8 @@ func webHandler(a *App, host, token string) http.Handler {
 			value, err = a.Buckets(in.ProfileID)
 		case "/api/delete-file":
 			value, err = a.DeleteFile(in.ProfileID, in.Bucket, in.Key, in.ETag)
+		case "/api/create-bucket":
+			value, err = a.CreateBucket(in.ProfileID, in.Bucket)
 		case "/api/create-folder":
 			value, err = a.CreateFolder(in.ProfileID, in.Bucket, in.Prefix, in.Key)
 		case "/api/browse":
