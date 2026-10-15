@@ -34,7 +34,7 @@ test('slow and failed bucket navigation makes old rows and actions unavailable; 
  await tryOldActions(h,oldRow);
  h.setResponder('browse',req=>page([file('shared.txt',req.Bucket==='bucket-b'?2:1)]));await h.get('refresh').click();await h.row('shared.txt').click();
  await queueSelectedDownload(h);assert.equal(h.calls('download').length,1);assert.equal(h.calls('download')[0].Bucket,'bucket-b');assert.equal(h.calls('download')[0].ProfileID,'one');assert.equal(h.calls('download')[0].Key,'shared.txt');
- await h.get('delete').click();await h.get('delete-form').onsubmit({preventDefault(){}});assert.equal(h.calls('delete-file').length,1);assert.deepEqual(h.calls('delete-file')[0],{ProfileID:'one',Bucket:'bucket-b',Key:'shared.txt',ETag:'same-content-etag'});
+ await h.get('delete').click();h.get('delete-confirmation').value='delete';await h.get('delete-form').onsubmit({preventDefault(){}});assert.equal(h.calls('delete-file').length,1);assert.deepEqual(h.calls('delete-file')[0],{ProfileID:'one',Bucket:'bucket-b',Key:'shared.txt',ETag:'same-content-etag'});
 });
 
 test('slow and failed folder navigation cannot select or act on the previous folder; refresh recovers',async()=>{
@@ -44,7 +44,7 @@ test('slow and failed folder navigation cannot select or act on the previous fol
  await tryOldActions(h,oldRow);await folder.click();assert.equal(h.calls('browse').at(-1).Prefix,'folder/');
  waiting.reject(Error('Folder access denied'));await navigation;assertUnavailable(h);assert.match(h.get('message').textContent,/Folder access denied/);
  await tryOldActions(h,oldRow);h.setResponder('browse',req=>page([file(req.Prefix+'shared.txt',3)]));await h.get('refresh').click();await h.row('shared.txt').click();
- await queueSelectedDownload(h);await h.get('delete').click();await h.get('delete-form').onsubmit({preventDefault(){}});assert.equal(h.calls('download')[0].Key,'folder/shared.txt');assert.equal(h.calls('delete-file')[0].Key,'folder/shared.txt');assert.equal(h.calls('delete-file')[0].Bucket,'bucket-a');
+ await queueSelectedDownload(h);await h.get('delete').click();h.get('delete-confirmation').value='delete';await h.get('delete-form').onsubmit({preventDefault(){}});assert.equal(h.calls('download')[0].Key,'folder/shared.txt');assert.equal(h.calls('delete-file')[0].Key,'folder/shared.txt');assert.equal(h.calls('delete-file')[0].Bucket,'bucket-a');
 });
 
 test('Go clears the previous listing while a typed path probe is slow or fails',async()=>{
@@ -108,7 +108,7 @@ test('a same-location refresh failure retains the existing listing and safely sc
 
 test('an open download and an in-flight batch deletion keep their original bucket after navigation',async()=>{
  const h=await setup();h.setResponder('browse',()=>page([file('a.txt'),file('b.txt')]));await h.get('refresh').click();h.get('select-all').click();await h.get('download').click();
- const firstDelete=deferred();let first=true;h.setResponder('delete-file',req=>{if(first){first=false;return firstDelete.promise}return req.Key});await h.get('delete').click();h.get('delete-confirmation').value='DELETE';const deleting=h.get('delete-form').onsubmit({preventDefault(){}});assert.equal(h.calls('delete-file').length,1);
+ const firstDelete=deferred();let first=true;h.setResponder('delete-file',req=>{if(first){first=false;return firstDelete.promise}return req.Key});await h.get('delete').click();h.get('delete-confirmation').value='delete';const deleting=h.get('delete-form').onsubmit({preventDefault(){}});assert.equal(h.calls('delete-file').length,1);
  await h.selectBucket('bucket-b');firstDelete.resolve('a.txt');await deleting;assert.deepEqual(h.calls('delete-file').map(req=>req.Bucket),['bucket-a','bucket-a']);assert.deepEqual(h.calls('delete-file').map(req=>req.Key),['a.txt','b.txt']);assert.equal(h.get('location').textContent,'bucket-b');assert.deepEqual(h.selected(),[]);
  await h.get('save-form').onsubmit({preventDefault(){}});assert.deepEqual(h.calls('download').map(req=>req.Bucket),['bucket-a','bucket-a']);assert.deepEqual(h.calls('download').map(req=>req.Key),['a.txt','b.txt']);
 });
@@ -136,17 +136,17 @@ test('selection metadata exposes complete literal keys and exact sizes while pre
 test('committed file deletions remain reported and only failures stay selected when refresh fails',async()=>{
  const h=await setup();h.setResponder('browse',()=>page([file('a.txt'),file('b.txt')]));await h.get('refresh').click();h.get('select-all').click();
  h.setResponder('delete-file',req=>{if(req.Key==='b.txt')throw Error('Access denied');return req.Key});h.setResponder('browse',()=>{throw Error('Offline during refresh')});
- await h.get('delete').click();assert.equal(h.calls('delete-file').length,0);h.get('delete-confirmation').value='DELETE';await h.get('delete-form').onsubmit({preventDefault(){}});
- assert.match(h.get('message').textContent,/Deleted 1 file.*Failed: b.txt: Access denied.*Listing refresh failed: Offline during refresh/);assert.deepEqual(h.selected(),['b.txt']);assert.equal(h.get('delete-dialog').open,false);
+ await h.get('delete').click();assert.equal(h.calls('delete-file').length,0);h.get('delete-confirmation').value='delete';await h.get('delete-form').onsubmit({preventDefault(){}});
+ assert.match(h.get('message').textContent,/Deleted 1 file.*Failed: b.txt: Access denied.*Listing refresh failed: Offline during refresh/);assert.deepEqual(h.selected(),['b.txt']);assert.equal(h.get('delete-dialog').open,true);assert.equal(h.get('delete-cancel').textContent,'Close');
 });
 test('folder deletion binds exact prefix preview and typed confirmation without selecting folders for download',async()=>{
  const h=await setup(),key='folder//% literal/';h.setResponder('browse',()=>page([{Key:key,Folder:true},file('keep.txt')]));await h.get('refresh').click();
  h.setResponder('preview-delete',req=>({PlanID:'opaque-one',Confirmation:req.Prefix,Objects:2,Versions:3,DeleteMarkers:1,MultipartUploads:1,TotalBytes:1024,Keys:[key+'<script>.txt']}));
  h.setResponder('execute-delete',()=>({Deleted:6,Aborted:1,Failures:[],Completed:true,BucketDeleted:false,Remaining:''}));
  const remove=h.row(key).children[1].children[1];let stopped=false;await remove.onclick({stopPropagation(){stopped=true}});assert.equal(stopped,true);assert.deepEqual(h.selected(),[]);assert.equal(h.get('download').disabled,true);assert.deepEqual(h.calls('preview-delete')[0],{ProfileID:'one',Bucket:'bucket-a',Prefix:key,Kind:'folder'});
- assert.match(h.get('delete-targets').textContent,/<script>.txt/);assert.equal(h.get('delete-targets').children.length,0);assert.match(h.get('delete-summary').textContent,/3 versions.*1 delete marker.*1 unfinished upload/);
+ assert.match(h.get('delete-rows').textContent,/<script>.txt/);assert.equal(h.get('delete-rows').children[0].children[0].children.length,0);assert.match(h.get('delete-summary').textContent,/3 versions.*1 delete marker.*1 unfinished upload/);
  h.get('delete-confirmation').value=key.slice(0,-1);await h.get('delete-form').onsubmit({preventDefault(){}});assert.equal(h.calls('execute-delete').length,0);
- await h.selectBucket('bucket-b');h.get('delete-confirmation').value=key;await h.get('delete-form').onsubmit({preventDefault(){}});assert.deepEqual(h.calls('execute-delete')[0],{PlanID:'opaque-one',Confirmation:key});assert.equal(h.get('location').textContent,'bucket-b');
+ await h.selectBucket('bucket-b');h.get('delete-confirmation').value='permanently delete';await h.get('delete-form').onsubmit({preventDefault(){}});assert.deepEqual(h.calls('execute-delete')[0],{PlanID:'opaque-one',Confirmation:key});assert.equal(h.get('location').textContent,'bucket-b');
 });
 test('cancelled and superseded deletion previews cannot enable a later dialog',async()=>{
  const h=await setup(),waiting=deferred();h.setResponder('preview-delete',req=>req.Prefix==='old/'?waiting.promise:{PlanID:'new-plan',Confirmation:req.Prefix,Objects:1,Versions:0,DeleteMarkers:0,MultipartUploads:0,TotalBytes:1,Keys:['new/key']});
@@ -156,7 +156,34 @@ test('cancelled and superseded deletion previews cannot enable a later dialog',a
 });
 test('partial recursive deletion requires a fresh reviewed plan and confirmation before another execution',async()=>{
  const h=await setup();let plans=0;h.setResponder('preview-delete',req=>({PlanID:'plan-'+(++plans),Confirmation:req.Prefix,Objects:1,Versions:0,DeleteMarkers:0,MultipartUploads:0,TotalBytes:1,Keys:['folder/key']}));h.setResponder('execute-delete',()=>({Deleted:1,Aborted:0,Failures:[{Key:'folder/locked',Error:'Retention locked'}],Completed:false,BucketDeleted:false,Remaining:'New objects remain'}));
- await h.context.previewDelete('folder','one','bucket-a','folder/');h.get('delete-confirmation').value='folder/';await h.get('delete-form').onsubmit({preventDefault(){}});assert.equal(h.calls('execute-delete').length,1);assert.equal(h.get('delete-review').hidden,false);assert.match(h.get('delete-error').textContent,/Retention locked.*\nNew objects remain/);
+ await h.context.previewDelete('folder','one','bucket-a','folder/');h.get('delete-confirmation').value='permanently delete';await h.get('delete-form').onsubmit({preventDefault(){}});assert.equal(h.calls('execute-delete').length,1);assert.equal(h.get('delete-review').hidden,false);assert.match(h.get('delete-error').textContent,/Retention locked.*\nNew objects remain/);
  await h.get('delete-form').onsubmit({preventDefault(){}});assert.equal(h.calls('execute-delete').length,1);await h.get('delete-review').click();assert.equal(plans,2);assert.equal(h.get('delete-confirmation').value,'');assert.equal(h.get('delete-confirm').disabled,true);
- h.get('delete-confirmation').value='folder/';await h.get('delete-form').onsubmit({preventDefault(){}});assert.equal(h.calls('execute-delete')[1].PlanID,'plan-2');
+ h.get('delete-confirmation').value='permanently delete';await h.get('delete-form').onsubmit({preventDefault(){}});assert.equal(h.calls('execute-delete')[1].PlanID,'plan-2');
+});
+
+
+test('single-object delete requires typed confirmation and keeps a non-repeatable result open',async()=>{
+ const h=await setup();await h.row('shared.txt').click();await h.get('delete').click();
+ await h.get('delete-form').onsubmit({preventDefault(){}});assert.equal(h.calls('delete-file').length,0);
+ h.get('delete-confirmation').value='DELETE';await h.get('delete-form').onsubmit({preventDefault(){}});assert.equal(h.calls('delete-file').length,0);
+ h.get('delete-confirmation').value='delete';await h.get('delete-form').onsubmit({preventDefault(){}});
+ assert.equal(h.calls('delete-file').length,1);assert.equal(h.get('delete-dialog').open,true);assert.equal(h.get('delete-confirm-section').hidden,true);assert.equal(h.get('delete-confirm').hidden,true);assert.equal(h.get('delete-cancel').textContent,'Close');assert.equal(h.get('delete-title').textContent,'Delete objects: status');
+ await h.get('delete-form').onsubmit({preventDefault(){}});assert.equal(h.calls('delete-file').length,1);h.get('delete-cancel').click();assert.equal(h.get('delete-dialog').open,false);
+});
+
+test('review remaining files excludes successful deletes and requires a fresh confirmation',async()=>{
+ const h=await setup();h.setResponder('browse',()=>page([file('a.txt'),file('b.txt')]));await h.get('refresh').click();h.get('select-all').click();
+ let fail=true;h.setResponder('delete-file',req=>{if(req.Key==='b.txt'&&fail)throw Error('Access denied');return req.Key});
+ await h.get('delete').click();h.get('delete-confirmation').value='delete';await h.get('delete-form').onsubmit({preventDefault(){}});assert.equal(h.get('delete-review').hidden,false);
+ await h.get('delete-review').click();assert.equal(h.get('delete-confirmation').value,'');assert.equal(h.get('delete-rows').children.length,1);assert.match(h.get('delete-rows').textContent,/b.txt/);
+ await h.get('delete-form').onsubmit({preventDefault(){}});assert.equal(h.calls('delete-file').length,2);
+ fail=false;h.get('delete-confirmation').value='delete';await h.get('delete-form').onsubmit({preventDefault(){}});assert.deepEqual(h.calls('delete-file').map(r=>r.Key),['a.txt','b.txt','b.txt']);
+});
+
+
+test('uncertain recursive deletion result cannot resend a consumed plan',async()=>{
+ const h=await setup();h.setResponder('preview-delete',req=>({PlanID:'uncertain-plan',Confirmation:req.Prefix,Objects:1,Versions:0,DeleteMarkers:0,MultipartUploads:0,TotalBytes:1,Keys:['folder/key']}));h.setResponder('execute-delete',()=>{throw Error('Connection lost')});
+ await h.context.previewDelete('folder','one','bucket-a','folder/');h.get('delete-confirmation').value='permanently delete';await h.get('delete-form').onsubmit({preventDefault(){}});
+ assert.equal(h.get('delete-title').textContent,'Delete objects: status');assert.equal(h.get('delete-review').hidden,false);assert.match(h.get('delete-error').textContent,/Some items may already have been deleted.*Connection lost/);
+ await h.get('delete-form').onsubmit({preventDefault(){}});assert.equal(h.calls('execute-delete').length,1);
 });

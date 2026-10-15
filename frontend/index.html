@@ -66,15 +66,21 @@
   </dialog>
   <dialog id="delete-dialog" aria-labelledby="delete-title" aria-describedby="delete-description">
     <form id="delete-form">
-      <div class="dialog-heading"><span class="eyebrow destructive-eyebrow">DELETE FROM STORAGE</span><h2 id="delete-title">Review deletion</h2><p id="delete-description">Review the exact storage location and contents before deleting.</p></div>
-      <div class="dialog-fields">
-        <p id="delete-context" class="delete-context"></p>
-        <div id="delete-targets" class="delete-targets" aria-label="Items to delete"></div>
-        <p id="delete-summary" role="status"></p>
-        <label id="delete-confirm-label" for="delete-confirmation"><span id="delete-confirm-prompt">Type the requested confirmation</span><input id="delete-confirmation" autocomplete="off" spellcheck="false"></label>
+      <div class="dialog-heading"><span class="eyebrow">OBJECT STORAGE</span><h2 id="delete-title">Delete objects</h2><p id="delete-context"></p></div>
+      <div class="delete-workspace">
+        <div id="delete-warning" class="delete-warning"><strong id="delete-warning-title">Review before deleting</strong><p id="delete-description">Review the exact storage location and contents before deleting.</p></div>
+        <section class="delete-card" aria-labelledby="delete-items-title">
+          <div class="delete-card-heading"><h3 id="delete-items-title">Specified objects</h3><p id="delete-summary" role="status" aria-live="polite"></p></div>
+          <p id="delete-targets" class="delete-scope"></p>
+          <div class="delete-table-wrap"><table class="delete-table"><thead><tr><th scope="col">Name</th><th scope="col">Type</th><th scope="col">Size</th><th id="delete-status-column" scope="col" hidden>Status</th></tr></thead><tbody id="delete-rows"></tbody></table></div>
+        </section>
+        <section id="delete-confirm-section" class="delete-card delete-confirm-section" aria-labelledby="delete-question">
+          <h3 id="delete-question">Delete objects?</h3>
+          <label id="delete-confirm-label" for="delete-confirmation"><span id="delete-confirm-prompt">Type the requested confirmation</span><input id="delete-confirmation" autocomplete="off" spellcheck="false" autocapitalize="off"></label>
+        </section>
         <p id="delete-error" role="alert"></p>
       </div>
-      <div class="dialog-actions"><button id="delete-cancel" type="button" autofocus>Cancel</button><button id="delete-review" type="button" hidden>Review remaining</button><button id="delete-confirm" type="submit" class="destructive" disabled>Delete</button></div>
+      <div class="dialog-actions"><button id="delete-cancel" type="button" autofocus>Cancel</button><button id="delete-review" type="button" hidden>Review remaining</button><button id="delete-confirm" type="submit" class="destructive" disabled>Delete objects</button></div>
     </form>
   </dialog>
   <script src="/app.js"></script>

@@ -1500,52 +1500,32 @@ button.destructive:hover {
   border-color:var(--destructive-hover);
 }
 
-#delete-dialog {
-  width:620px;
-}
-
-.destructive-eyebrow {
-  color:var(--danger);
-}
-
-#delete-context {
-  padding:10px 12px;
-  border:1px solid var(--border);
-  border-radius:6px;
-  background:var(--surface-subtle);
-  color:var(--text);
-  white-space:pre-wrap;
-  overflow-wrap:anywhere;
-}
-
-.delete-targets {
-  max-height:220px;
-  margin-top:12px;
-  padding:10px 12px;
-  overflow:auto;
-  border:1px solid var(--border);
-  border-radius:6px;
-  font-size:12px;
-  line-height:1.6;
-  white-space:pre-wrap;
-  overflow-wrap:anywhere;
-}
-
-#delete-summary {
-  color:var(--warning-text);
-}
-
-#delete-error {
-  max-height:180px;
-  overflow:auto;
-  white-space:pre-wrap;
-  overflow-wrap:anywhere;
-  color:var(--danger);
-}
-
-#delete-confirmation {
-  font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
-}
+#delete-dialog { width:1000px; }
+.delete-workspace { display:flex; flex-direction:column; gap:20px; padding:24px 26px; background:var(--canvas); }
+#delete-context { margin-top:10px; color:var(--muted); overflow-wrap:anywhere; }
+.delete-warning { padding:16px 20px; border:1px solid var(--danger-border); border-left:4px solid var(--danger); border-radius:6px; background:var(--surface); }
+.delete-result-success { border-color:var(--success-border); background:var(--success-bg); }
+.delete-warning strong { color:var(--text); }
+.delete-warning p { margin:8px 0 0; line-height:1.6; color:var(--text); }
+.delete-card { min-width:0; overflow:hidden; border:1px solid var(--border); border-radius:8px; background:var(--surface); }
+.delete-card-heading { padding:18px 20px; border-bottom:1px solid var(--border); }
+.delete-card h3 { margin:0; font-size:16px; color:var(--text); }
+#delete-summary { margin-top:8px; color:var(--muted); line-height:1.6; overflow-wrap:anywhere; }
+.delete-scope { padding:12px 20px; margin:0; color:var(--muted); overflow-wrap:anywhere; white-space:pre-line; font-size:12px; }
+.delete-table-wrap { max-height:260px; overflow:auto; }
+.delete-table { width:100%; border-collapse:collapse; table-layout:fixed; }
+#delete-dialog .delete-table th,#delete-dialog .delete-table td { display:table-cell; padding:12px 20px; text-align:left; border-top:1px solid var(--border); overflow-wrap:anywhere; white-space:normal; text-overflow:clip; }
+.delete-table th { position:sticky; top:0; background:var(--surface-subtle); color:var(--muted); font-size:12px; }
+#delete-dialog .delete-table th:nth-child(1) { width:50%; }
+#delete-dialog .delete-table th:nth-child(2) { width:22%; }
+#delete-dialog .delete-table th:nth-child(3) { width:14%; }
+#delete-dialog .delete-table th:nth-child(4) { width:14%; }
+.delete-confirm-section { padding:20px; }
+#delete-confirm-label { display:block; margin-top:16px; font-size:13px; font-weight:400; }
+#delete-confirmation { display:block; width:100%; max-width:540px; margin-top:8px; font-family:inherit; }
+#delete-error { max-height:220px; overflow:auto; margin:0; white-space:pre-wrap; overflow-wrap:anywhere; color:var(--danger); }
+#delete-error:empty { display:none; }
+@media(max-width:640px) { .delete-workspace { padding:14px; gap:14px; } .delete-table th,.delete-table td { padding:10px; } .delete-table th:first-child { width:50%; } }
 
 .object-folder td:nth-child(2) {
   position:relative;

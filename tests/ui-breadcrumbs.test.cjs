@@ -75,8 +75,8 @@ test('batch delete cancel makes no requests; partial failure remains selected',a
  const h=await setup();let files=[{Key:'a',Size:1,ETag:'a-tag'},{Key:'b',Size:2,ETag:'b-tag'}];h.setResponder(async()=>({Objects:files,Next:''}));await h.get('refresh').click();h.get('select-all').click();
  const original=h.context.fetch,calls=[];
  h.context.fetch=async(url,options)=>{if(!url.endsWith('/delete-file'))return original(url,options);const data=JSON.parse(options.body);calls.push(data);if(data.Key==='b')return{ok:false,json:async()=>({error:'Access denied'})};files=files.filter(f=>f.Key!==data.Key);return{ok:true,json:async()=>data.Key}};
- await h.get('delete').click();assert.equal(calls.length,0);assert.match(h.get('delete-targets').textContent,/bucket-a\/a/);assert.match(h.get('delete-targets').textContent,/bucket-a\/b/);h.get('delete-cancel').click();
- await h.get('delete').click();h.get('delete-confirmation').value='DELETE';await h.get('delete-form').onsubmit({preventDefault(){}});assert.equal(calls.length,2);assert.equal(calls[0].ETag,'a-tag');assert.match(h.get('message').textContent,/Deleted 1 file.*Failed: b: Access denied/);assert.equal(h.get('selection-count').textContent,'1 file selected');assert.match(h.get('details').textContent,/Selected: b/);
+ await h.get('delete').click();assert.equal(calls.length,0);assert.match(h.get('delete-targets').textContent,/bucket-a/);assert.match(h.get('delete-rows').textContent,/aObject/);assert.match(h.get('delete-rows').textContent,/bObject/);h.get('delete-cancel').click();
+ await h.get('delete').click();h.get('delete-confirmation').value='delete';await h.get('delete-form').onsubmit({preventDefault(){}});assert.equal(calls.length,2);assert.equal(calls[0].ETag,'a-tag');assert.match(h.get('message').textContent,/Deleted 1 file.*Failed: b: Access denied/);assert.equal(h.get('selection-count').textContent,'1 file selected');assert.match(h.get('details').textContent,/Selected: b/);
 });
 
 test('path completion fills folder and file names without navigating or selecting',async()=>{

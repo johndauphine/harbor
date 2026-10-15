@@ -298,47 +298,66 @@ function updateDeleteConfirmation(){
  const expected=deleteState?.confirmation||'';
  $('delete-confirm').disabled=!deleteState?.ready||deleteExecuting||(expected&&$('delete-confirmation').value!==expected);
  $('delete-confirmation').disabled=deleteExecuting;$('delete-cancel').disabled=deleteExecuting;$('delete-review').disabled=deleteExecuting;
+ $('delete-dialog').setAttribute('aria-busy',String(deleteExecuting));
 }
 function closeDeleteDialog(){if(deleteExecuting)return;deleteRequest++;deleteState=null;$('delete-dialog').close()}
+function renderDeleteRows(items){
+ $('delete-status-column').hidden=!items.some(item=>item.status);$('delete-rows').replaceChildren();for(const item of items){const row=document.createElement('tr');for(const value of [item.key,item.type,item.size]){const cell=document.createElement('td');cell.textContent=value;row.append(cell)}if(item.status){const cell=document.createElement('td');cell.textContent=item.status;row.append(cell)}$('delete-rows').append(row)}
+}
+function deletePrompt(state){
+ $('delete-confirm-prompt').textContent='To confirm deletion, type “'+state.confirmation+'” in the text input field.';
+ $('delete-confirmation').placeholder=state.confirmation;
+}
+function showDeleteResults(state,summary,errors='',remaining=false){
+ state.ready=false;$('delete-title').textContent=state.kind==='bucket'?'Delete bucket: status':'Delete objects: status';
+ $('delete-description').textContent=remaining?'Some items could not be deleted. Review the remaining items and confirm again to retry.':'Deletion finished. Review the results below before closing.';
+ $('delete-items-title').textContent='Deletion details';$('delete-summary').textContent=summary;$('delete-error').textContent=errors;
+ $('delete-warning').hidden=false;$('delete-warning').className='delete-warning '+(remaining?'':'delete-result-success');$('delete-warning-title').textContent=remaining?'Deletion incomplete':'Deletion completed';$('delete-confirm-section').hidden=true;$('delete-confirm').hidden=true;
+ $('delete-cancel').textContent='Close';$('delete-review').hidden=!remaining;$('delete-confirmation').value='';
+}
 function prepareDeleteDialog(state){
- deleteRequest++;deleteState=state;$('delete-title').textContent=state.kind==='files'?'Delete selected files':state.kind==='folder'?'Delete folder and contents':'Delete bucket and contents';
- $('delete-context').textContent=state.connection+' · '+state.target.Bucket+(state.kind==='folder'?'/'+state.target.Prefix:'');
- $('delete-description').textContent=state.kind==='files'?'Review the exact files below. Bucket versioning and retention rules apply.':state.kind==='folder'?'Permanently delete this exact folder prefix, including its objects, all versions, delete markers and unfinished multipart uploads.':'Permanently delete this bucket and its contents, including all versions, delete markers and unfinished multipart uploads. The bucket name may become available to others.';
- $('delete-targets').textContent=state.kind==='files'?state.files.map(o=>state.target.Bucket+'/'+o.Key).join('\n'):state.target.Bucket+'/'+(state.target.Prefix||'');
- $('delete-summary').textContent=state.kind==='files'?state.files.length+' selected file'+(state.files.length===1?'':'s'):'Preparing a deletion preview…';
- $('delete-error').textContent='';$('delete-review').hidden=true;$('delete-confirmation').value='';$('delete-confirm-label').hidden=!state.confirmation;
- $('delete-confirm-prompt').textContent=state.confirmation?'Type '+state.confirmation+' to confirm':'';
- $('delete-confirmation').required=!!state.confirmation;updateDeleteConfirmation();
+ deleteRequest++;deleteState=state;$('delete-title').textContent=state.kind==='bucket'?'Delete bucket':'Delete objects';
+ $('delete-context').textContent=state.connection+' / '+state.target.Bucket+(state.kind==='folder'?'/'+state.target.Prefix:'');
+ $('delete-description').textContent=state.kind==='files'?'Deleting these objects cannot be undone in Harbor. In versioned buckets, S3 may create delete markers and retain previous versions. Bucket retention rules apply.':state.kind==='folder'?'This action permanently deletes the specified folder and all reviewed objects, versions, delete markers and unfinished uploads under its exact prefix. This action cannot be undone.':'This action permanently empties and deletes the specified bucket, including all reviewed versions, delete markers and unfinished uploads. This action cannot be undone. The bucket name may become available to others.';
+ $('delete-targets').textContent='s3://'+state.target.Bucket+'/'+(state.target.Prefix||'');
+ renderDeleteRows(state.kind==='files'?state.files.map(o=>({key:o.Key,type:'Object',size:formatBytes(o.Size)})):[]);
+ $('delete-items-title').textContent=state.kind==='bucket'?'Specified bucket':'Specified objects';
+ $('delete-question').textContent=state.kind==='bucket'?'Delete bucket?':'Delete objects?';
+ $('delete-confirm').textContent=state.kind==='bucket'?'Delete bucket':'Delete objects';
+ $('delete-summary').textContent=state.kind==='files'?deletionCount(state.files.length,'selected object'):'Preparing a deletion preview…';
+ $('delete-error').textContent='';$('delete-review').hidden=true;$('delete-confirmation').value='';$('delete-confirm-label').hidden=false;
+ $('delete-warning').hidden=false;$('delete-warning').className='delete-warning';$('delete-warning-title').textContent='Review before deleting';$('delete-confirm-section').hidden=false;$('delete-confirm').hidden=false;$('delete-cancel').textContent='Cancel';
+ deletePrompt(state);$('delete-confirmation').required=true;updateDeleteConfirmation();
  if(!$('delete-dialog').open)$('delete-dialog').showModal();$('delete-cancel').focus?.();
 }
 $('delete-confirmation').oninput=updateDeleteConfirmation;$('delete-cancel').onclick=closeDeleteDialog;
 $('delete-dialog').oncancel=e=>{if(deleteExecuting)e.preventDefault();else{deleteRequest++;deleteState=null}};
 $('delete').onclick=action(async()=>{
  if(deleting||deleteExecuting)return;const files=selectedFiles();if(!files.length)throw Error('Select files first');
- const target=listingContext;prepareDeleteDialog({kind:'files',target,files:files.map(o=>Object.freeze({...o})),connection:connectionProfiles.find(p=>p.ID===target.ProfileID)?.Name||'Selected connection',confirmation:files.length>1?'DELETE':'',ready:true});
+ const target=listingContext;prepareDeleteDialog({kind:'files',target,files:files.map(o=>Object.freeze({...o})),connection:connectionProfiles.find(p=>p.ID===target.ProfileID)?.Name||'Selected connection',confirmation:'delete',ready:true});
 });
 async function previewDelete(kind,owner,name,folder=''){
- if(deleteExecuting)return;const target=Object.freeze({ProfileID:owner,Bucket:name,Prefix:folder,Kind:kind}),state={kind,target,connection:connectionProfiles.find(p=>p.ID===owner)?.Name||'Selected connection',confirmation:kind==='folder'?folder:name,ready:false};
+ if(deleteExecuting)return;const target=Object.freeze({ProfileID:owner,Bucket:name,Prefix:folder,Kind:kind}),state={kind,target,connection:connectionProfiles.find(p=>p.ID===owner)?.Name||'Selected connection',confirmation:kind==='folder'?'permanently delete':name,ready:false};
  prepareDeleteDialog(state);const request=deleteRequest;
  try{
   const plan=await api('preview-delete',target);if(request!==deleteRequest||deleteState!==state)return;
-  state.plan=plan;state.confirmation=plan.Confirmation;state.ready=true;
+  state.plan=plan;state.ready=true;
   $('delete-summary').textContent=[deletionCount(plan.Objects,'object'),deletionCount(plan.Versions,'version'),deletionCount(plan.DeleteMarkers,'delete marker'),deletionCount(plan.MultipartUploads,'unfinished upload'),formatBytes(plan.TotalBytes)].join(' · ');
-  $('delete-targets').textContent=target.Bucket+'/'+target.Prefix+'\n\nPreview sample (up to 8 keys; counts cover the entire scope):\n'+(plan.Keys||[]).join('\n');
-  $('delete-confirm-prompt').textContent='Type '+state.confirmation+' to confirm';updateDeleteConfirmation();
+  $('delete-targets').textContent='s3://'+target.Bucket+'/'+target.Prefix+' · Preview sample (up to 8 keys; counts cover the entire scope).';
+  renderDeleteRows((plan.Keys||[]).map(key=>({key,type:key.endsWith('/')?'Folder':'Object / version',size:'—'})));deletePrompt(state);updateDeleteConfirmation();
  }catch(e){if(request!==deleteRequest||deleteState!==state)return;$('delete-error').textContent=e.message;$('delete-summary').textContent='Nothing has been deleted.';$('delete-review').hidden=false;updateDeleteConfirmation()}
 }
-$('delete-review').onclick=action(async()=>{const state=deleteState;if(state&&state.kind!=='files')await previewDelete(state.kind,state.target.ProfileID,state.target.Bucket,state.target.Prefix)});
+$('delete-review').onclick=action(async()=>{const state=deleteState;if(!state)return;if(state.kind==='files'){if(state.files.length)prepareDeleteDialog({...state,ready:true})}else await previewDelete(state.kind,state.target.ProfileID,state.target.Bucket,state.target.Prefix)});
 async function deleteSelectedFiles(state){
  const failed=[];let deleted=0,refreshWarning='';
- for(const o of state.files){try{await api('delete-file',{ProfileID:state.target.ProfileID,Bucket:state.target.Bucket,Key:o.Key,ETag:o.ETag});deleted++}catch(e){failed.push({key:o.Key,error:e.message})}}
+ for(const o of state.files){$('delete-summary').textContent='Deleting objects… '+(deleted+failed.length)+' of '+state.files.length+' processed';try{await api('delete-file',{ProfileID:state.target.ProfileID,Bucket:state.target.Bucket,Key:o.Key,ETag:o.ETag});deleted++}catch(e){failed.push({key:o.Key,error:e.message})}}
  if(currentListing(state.target)){
   selectedKeys=new Set(failed.map(f=>f.key));updateSelection();
   try{await browse()}catch(e){refreshWarning='Listing refresh failed: '+e.message}
   if(currentListing(state.target)){selectedKeys=new Set(failed.map(f=>f.key));updateSelection()}
  }
  const summary='Deleted '+deleted+' file'+(deleted===1?'':'s')+(failed.length?' · Failed: '+failed.map(f=>f.key+': '+f.error).join(' · '):'')+(refreshWarning?' · '+refreshWarning:'');
- $('delete-dialog').close();deleteState=null;message(summary);
+ renderDeleteRows(state.files.map(o=>({key:o.Key,type:'Object',size:formatBytes(o.Size),status:failed.some(f=>f.key===o.Key)?'Failed':'Deleted'})));state.files=state.files.filter(o=>failed.some(f=>f.key===o.Key));showDeleteResults(state,summary,failed.map(f=>f.key+': '+f.error).join('\n'),failed.length>0);message(summary);
 }
 async function refreshDeletedScope(state,result){
  if(profile!==state.target.ProfileID)return '';
@@ -352,20 +371,19 @@ async function refreshDeletedScope(state,result){
 }
 $('delete-form').onsubmit=async e=>{
  e.preventDefault();const state=deleteState;if(!state?.ready||deleteExecuting||(state.confirmation&&$('delete-confirmation').value!==state.confirmation))return;
- deleteExecuting=true;deleting=true;state.ready=false;updateDeleteConfirmation();updateSelection();$('delete-error').textContent='';
+ deleteExecuting=true;deleting=true;state.ready=false;updateDeleteConfirmation();updateSelection();$('delete-error').textContent='';$('delete-summary').textContent='Deletion in progress… Keep Harbor open until the operation finishes.';
  try{
   if(state.kind==='files')await deleteSelectedFiles(state);
   else{
-   const result=await api('execute-delete',{PlanID:state.plan.PlanID,Confirmation:$('delete-confirmation').value});
+   const result=await api('execute-delete',{PlanID:state.plan.PlanID,Confirmation:state.plan.Confirmation});
    const warning=await refreshDeletedScope(state,result),failures=(result.Failures||[]).map(f=>f.Key+': '+f.Error);
    const summary='Deleted '+result.Deleted+(result.Deleted===1?' object or version':' objects or versions')+' · Aborted '+deletionCount(result.Aborted,'unfinished upload')+(result.BucketDeleted?' · Bucket deleted':'')+(warning?' · '+warning:'');
    message(summary+(failures.length?' · Some items could not be deleted':'')+(result.Remaining?' · '+result.Remaining:''));
    if(!result.Completed&&!failures.length)$('message').className='status-warning';
-   if(result.Completed){$('delete-dialog').close();deleteState=null}
-   else{$('delete-summary').textContent=summary;$('delete-error').textContent=[...failures,result.Remaining||'Review a fresh preview before deleting any remaining items.'].filter(Boolean).join('\n');$('delete-review').hidden=false;$('delete-confirmation').value=''}
+   showDeleteResults(state,summary,[...failures,result.Completed?'':result.Remaining||'Review a fresh preview before deleting any remaining items.'].filter(Boolean).join('\n'),!result.Completed);
   }
- }catch(error){$('delete-error').textContent=state.kind==='files'?error.message:'Could not confirm the deletion result: '+error.message+'. Some items may already have been deleted. Review remaining to prepare a fresh preview.';if(state.kind!=='files')$('delete-review').hidden=false;else state.ready=true}
- finally{deleteExecuting=false;deleting=false;updateDeleteConfirmation();updateSelection()}
+ }catch(error){showDeleteResults(state,'Deletion result could not be confirmed.','Some items may already have been deleted. '+error.message+' Review remaining to prepare a fresh confirmation.',true)}
+ finally{deleteExecuting=false;deleting=false;updateDeleteConfirmation();updateSelection();if(!state.ready)$('delete-cancel').focus?.()}
 };
 
 function renderBreadcrumbs(){
