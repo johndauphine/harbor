@@ -29,6 +29,10 @@ Transfers interrupted in older builds cannot be reconstructed because those buil
 
 Downgrading while recoverable transfers exist is unsupported: older executables neither restore this journal nor protect its staged files. Finish or discard that work before switching versions.
 
+## Transfer tuning preference
+
+The new transfer tuning table stores only the selected mode. Automatic is the default when no preference is saved. Use Transfers → Transfer performance → Fixed to disable adaptation persistently, or launch with `--no-auto-tuning` to force fixed settings for that session without changing the saved preference. The selector explains and respects the launch override. Learning resets on restart; part sizes and recovery checkpoints retain their existing format. Interrupted transfers still require explicit Retry and do not start automatically.
+
 ## Backups, moving computers and returning to an older build
 
 **Restoring a database does not restore its credentials.** Credential rotation may have removed the vault entry referenced by an older backup. The restored connection can appear in Harbor but fail authentication. Edit it and enter a complete access key and secret key, plus a session token if required. Partial key replacement needs the previous vault entry and cannot repair a missing one.

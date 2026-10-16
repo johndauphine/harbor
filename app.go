@@ -102,7 +102,8 @@ type App struct {
 	workers          sync.WaitGroup
 	operations       map[string]context.CancelFunc
 	shutdownDone     chan struct{}
-	rangeSlots       chan struct{}
+	tuningMu         sync.Mutex
+	transferTuning   *appTransferTuning
 	profiles         []Profile
 	transfers        map[string]*Transfer
 	transferOrder    []string
@@ -198,7 +199,10 @@ func (a *App) startup(ctx context.Context) (startupErr error) {
 		log.Print("Unused credential cleanup remains pending; unlock the credential vault and restart Harbor to retry")
 	}
 	a.profileMu.Unlock()
-	return a.recoverTransfers(db)
+	if err = a.recoverTransfers(db); err != nil {
+		return err
+	}
+	return a.restoreTransferTuning()
 }
 
 var errShuttingDown = errors.New("Application is shutting down")
@@ -511,7 +515,11 @@ func (a *App) client(ctx context.Context, profileID string) (*s3.Client, error) 
 	if err != nil {
 		return nil, fmt.Errorf("Credential vault: %w", err)
 	}
-	return configuredS3Client(ctx, p, raw)
+	c, err := configuredS3Client(ctx, p, raw)
+	if err != nil {
+		return nil, err
+	}
+	return a.tuneClient(c, p), nil
 }
 
 func configuredS3Client(ctx context.Context, p Profile, raw string) (*s3.Client, error) {
@@ -754,7 +762,7 @@ func (a *App) RetryTransfer(id string) error {
 				var c *s3.Client
 				c, err = configuredS3Client(cleanup, selected, raw)
 				if err == nil {
-					err = a.cleanupMultipartWithClient(cleanup, c, spec)
+					err = a.cleanupMultipartWithClient(cleanup, a.tuneClient(c, selected), spec)
 				}
 			}
 		}
@@ -907,13 +915,29 @@ func (c *cleanupUploadClient) AbortMultipartUpload(ctx context.Context, in *s3.A
 	return out, err
 }
 
-func (a *App) execute(ctx context.Context, t Transfer) error {
+func (a *App) execute(ctx context.Context, t Transfer) (resultErr error) {
+	defer func() {
+		if resultErr != nil && ctx.Err() == nil {
+			resetTuningAfterValidation(a, ctx, resultErr)
+		}
+	}()
+	release, admissionErr := a.acquireActiveTransfer(ctx)
+	if admissionErr != nil {
+		return admissionErr
+	}
+	defer release()
 	if err := a.prepareTransfer(ctx, t); err != nil {
 		return err
 	}
 	c, e := a.client(ctx, t.ProfileID)
 	if e != nil {
 		return e
+	}
+	ctx = a.transferTuningContext(ctx, t)
+	if client, ok := c.Options().HTTPClient.(*http.Client); ok {
+		if rt, ok := client.Transport.(*tuningRoundTripper); ok {
+			ctx = context.WithValue(ctx, tuningContextKey{}, tuningIdentity{id: t.ID, scope: rt.scope, direction: t.Direction})
+		}
 	}
 	update := func(n int64) {
 		a.mu.Lock()
@@ -949,12 +973,17 @@ func (a *App) execute(ctx context.Context, t Transfer) error {
 			uploadClient.transfer = t
 			uploadClient.scope = multipartClientScope(c)
 		}
+		started := time.Now()
 		_, e = manager.NewUploader(uploadClient).Upload(ctx, &s3.PutObjectInput{Bucket: aws.String(t.Bucket), Key: aws.String(t.Key), Body: &progressReader{Reader: f, update: update}})
 		if uploadClient.abortErr != nil {
 			return &multipartCleanupError{}
 		}
+		if e == nil {
+			a.observeUsefulTransfer(ctx, st.Size(), started)
+		}
 		return e
 	}
+	started := time.Now()
 	rangeFallback := false
 	if a.journalEnabled && t.checkpoint != nil && t.checkpoint.Kind == "download" {
 		handled, err := a.parallelDownload(ctx, c, t, nil)
@@ -1026,11 +1055,17 @@ func (a *App) execute(ctx context.Context, t Transfer) error {
 	}
 	if t.destination != nil {
 		if t.destination.Overwrite {
-			return os.Rename(tmp, t.destination.Path)
+			e = os.Rename(tmp, t.destination.Path)
+		} else {
+			e = os.Link(tmp, t.destination.Path)
 		}
-		return os.Link(tmp, t.destination.Path)
+	} else {
+		e = os.Rename(tmp, t.Path)
 	}
-	return os.Rename(tmp, t.Path)
+	if e == nil {
+		a.observeUsefulTransfer(ctx, aws.ToInt64(v.ContentLength), started)
+	}
+	return e
 }
 
 // CreateFolder writes an S3 folder marker without replacing an existing object.

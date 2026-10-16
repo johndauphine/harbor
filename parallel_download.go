@@ -88,14 +88,6 @@ func validateTransferCheckpoint(t Transfer) error {
 	}
 	return nil
 }
-func (a *App) transferSlots() chan struct{} {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.rangeSlots == nil {
-		a.rangeSlots = make(chan struct{}, 8)
-	}
-	return a.rangeSlots
-}
 func (a *App) storeCheckpoint(t Transfer, c *transferCheckpoint, path string) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -272,7 +264,9 @@ func (a *App) parallelDownload(ctx context.Context, c *s3.Client, t Transfer, in
 			}
 			for index, want := range cp.Blocks {
 				start := int64(index) * cp.ChunkSize
+				verifyStarted := time.Now()
 				got, e := digestRange(file, start, min(cp.ChunkSize, size-start))
+				a.recordTransferPhase("download verification", verifyStarted)
 				if e != nil || got != want {
 					delete(cp.Blocks, index)
 				}
@@ -324,7 +318,6 @@ func (a *App) parallelDownload(ctx context.Context, c *s3.Client, t Transfer, in
 	var once sync.Once
 	var firstErr error
 	var group sync.WaitGroup
-	slots := a.transferSlots()
 	count := checkpointChunks(cp)
 	fail := func(e error) { once.Do(func() { firstErr = e; cancel() }) }
 	for worker := 0; worker < min(8, count); worker++ {
@@ -339,15 +332,13 @@ func (a *App) parallelDownload(ctx context.Context, c *s3.Client, t Transfer, in
 				if _, done := cp.Blocks[index]; done {
 					continue
 				}
-				select {
-				case slots <- struct{}{}:
-				case <-workCtx.Done():
+				if workCtx.Err() != nil {
 					return
 				}
+				started := time.Now()
 				start := int64(index) * cp.ChunkSize
 				length := min(cp.ChunkSize, size-start)
 				e := func() error {
-					defer func() { <-slots }()
 					input := &s3.GetObjectInput{Bucket: aws.String(t.Bucket), Key: aws.String(t.Key), Range: aws.String(fmt.Sprintf("bytes=%d-%d", start, start+length-1)), IfMatch: aws.String(etag)}
 					if version != "" {
 						input.VersionId = aws.String(version)
@@ -383,10 +374,17 @@ func (a *App) parallelDownload(ctx context.Context, c *s3.Client, t Transfer, in
 					if e = workCtx.Err(); e != nil {
 						return e
 					}
-					if e = file.Sync(); e != nil {
+					syncStarted := time.Now()
+					e = file.Sync()
+					a.recordTransferPhase("disk sync", syncStarted)
+					if e != nil {
 						return e
 					}
-					return a.saveCheckpointBlock(t, index, hex.EncodeToString(h.Sum(nil)))
+					err := a.saveCheckpointBlock(t, index, hex.EncodeToString(h.Sum(nil)))
+					if err == nil {
+						a.observeUsefulTransfer(workCtx, length, started)
+					}
+					return err
 				}()
 				if e != nil {
 					fail(e)

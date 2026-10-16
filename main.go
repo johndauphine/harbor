@@ -24,6 +24,7 @@ import (
 var assets embed.FS
 
 func main() {
+	noAutoTuning := flag.Bool("no-auto-tuning", false, "Disable automatic transfer tuning for this launch and use fixed settings")
 	noBrowser := flag.Bool("no-browser", false, "Print the session URL without opening the default browser")
 	showVersion := flag.Bool("version", false, "Print build information and exit")
 	port := flag.Int("port", 0, "Local port (0 chooses an available port)")
@@ -51,6 +52,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+	app.applyTransferTuningOverride(*noAutoTuning)
 	tokenBytes := make([]byte, 32)
 	if _, err = rand.Read(tokenBytes); err != nil {
 		panic(err)
@@ -152,6 +154,13 @@ func webHandler(a *App, host, token string) http.Handler {
 				http.Error(w, "Connection unavailable", 400)
 				return
 			}
+			release, prepErr := a.acquireTransferPreparation(r.Context())
+			if prepErr != nil {
+				http.Error(w, "Upload cancelled", 400)
+				return
+			}
+			defer release()
+			stageStarted := time.Now()
 			dir, err := a.transferCacheDir()
 			if err != nil {
 				http.Error(w, "Cache unavailable", 500)
@@ -177,6 +186,7 @@ func webHandler(a *App, host, token string) http.Handler {
 				http.Error(w, "Upload staging failed", 400)
 				return
 			}
+			a.recordTransferPhase("staging", stageStarted)
 			id, queueErr := a.queueTransfer("upload", profile, bucket, key, path)
 			if queueErr != nil {
 				os.Remove(path)
@@ -202,6 +212,7 @@ func webHandler(a *App, host, token string) http.Handler {
 			Path         string
 			Name         string
 			Confirmation string
+			Mode         string
 			Kind         string
 			PlanID       string
 			Overwrite    bool
@@ -253,6 +264,13 @@ func webHandler(a *App, host, token string) http.Handler {
 			value, err = a.SaveDownload(r.Context(), in.ID, in.Path, in.Name, in.Overwrite)
 		case "/api/download":
 			value, err = a.QueueDownloadTo(in.ProfileID, in.Bucket, in.Key, in.Path, in.Name, in.Overwrite)
+		case "/api/transfer-tuning":
+			value = a.TransferTuningStatus()
+		case "/api/set-transfer-tuning":
+			err = a.SetTransferTuningMode(in.Mode)
+			if err == nil {
+				value = a.TransferTuningStatus()
+			}
 		case "/api/transfers":
 			value = a.Transfers()
 		case "/api/cancel":
