@@ -44,4 +44,6 @@ Explicit limitations: request fairness applies among up to eight active transfer
 - Builds passed for macOS ARM64, Windows AMD64/ARM64, and Linux AMD64. Cross-builds do not establish interactive runtime coverage on those operating systems.
 - Actual browser smoke test used an isolated database and the final feature binary; the existing user configuration was untouched during the test.
 
-These results precede GitHub CI and merge. No unrelated credential-test changes are included in this feature.
+The first GitHub CI pass exposed a Windows-sensitive test assumption: immediate samples can share one interrupt-clock tick. The sampler correctly leaves a zero-interval CPU rate unknown. The test now defines a positive interval while retaining both native CPU readings, strictly asserts counter availability, and retains rate validation. One hundred race-enabled sampler repetitions passed on Mac; Windows CI must still verify the platform-specific fix. Production sampling behavior is unchanged.
+
+These local results precede final GitHub CI and merge. No unrelated credential-test changes are included in this feature.

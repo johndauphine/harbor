@@ -55,15 +55,23 @@ func TestSampleTuningResources(t *testing.T) {
 	if first.CPUKnown {
 		t.Fatal("first sample cannot have a CPU rate")
 	}
+	if !previous.cpuKnown {
+		t.Fatal("native process CPU counter unavailable on supported platform")
+	}
 	if !first.DiskKnown {
 		t.Fatal("existing temporary directory must have a disk reading on supported platforms")
 	}
 	if first.MemoryKnown && first.MemoryAvailableBytes > first.MemoryTotalBytes {
 		t.Fatal("available memory exceeds total")
 	}
-	second, _ := sampleTuningResources(directory, previous)
+	// Windows' shared interrupt clock can return the same tick for immediate
+	// samples. Supply a deterministic positive interval while retaining both
+	// real native CPU readings; zero CPU usage over that interval is valid.
+	baseline := *previous
+	baseline.at = baseline.at.Add(-time.Second)
+	second, current := sampleTuningResources(directory, &baseline)
 	if !second.CPUKnown {
-		t.Fatal("second sample must have process CPU rate on supported platforms")
+		t.Fatalf("second sample must have process CPU rate: elapsed=%s previousKnown=%t currentKnown=%t previousCPU=%s currentCPU=%s", current.at.Sub(baseline.at), baseline.cpuKnown, current.cpuKnown, baseline.cpu, current.cpu)
 	}
 	if second.CPUFraction < 0 || second.CPUFraction > 1 || math.IsNaN(second.CPUFraction) {
 		t.Fatal("invalid CPU fraction")
