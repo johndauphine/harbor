@@ -8,6 +8,7 @@ type adaptiveController struct {
 	limit, resource       int
 	reason                string
 	start, last, cooldown time.Time
+	eligibleAfter         time.Time
 	bytes                 int64
 	successes             int
 	baseline, previous    float64
@@ -41,6 +42,7 @@ func (c *adaptiveController) resetLearning() {
 	c.previous = 0
 	c.stable = 0
 	c.probeFrom = 0
+	c.eligibleAfter = time.Time{}
 }
 func (c *adaptiveController) observe(s transferSample, demand bool) {
 	if s.Cancelled || s.Finished.IsZero() || !s.Finished.After(s.Started) {
@@ -53,7 +55,9 @@ func (c *adaptiveController) observe(s transferSample, demand bool) {
 		}
 		now = c.last
 	}
-	if !c.last.IsZero() && now.Sub(c.last) > 30*time.Second {
+	// A long-running request is active work, even if no part has finished
+	// recently. Only a gap before the next request started is idle.
+	if !c.last.IsZero() && s.Started.Sub(c.last) >= 30*time.Second {
 		c.resetLearning()
 		c.reason = "Relearning after idle time"
 	}
@@ -80,6 +84,13 @@ func (c *adaptiveController) observe(s transferSample, demand bool) {
 		c.resetWindow()
 		return
 	}
+	// Samples may complete in bursts or have waited in the SDK queue. Old
+	// operations cannot measure the new admission setting. A fresh operation
+	// establishes a warm-up boundary; only later completions enter its window.
+	if !c.eligibleAfter.IsZero() && s.Started.Before(c.eligibleAfter) {
+		c.resetWindow()
+		return
+	}
 	if c.start.IsZero() {
 		c.start = now
 		return // warm-up: subsequent completions share one wall-clock window
@@ -87,9 +98,11 @@ func (c *adaptiveController) observe(s transferSample, demand bool) {
 	c.bytes += max(0, s.Bytes)
 	c.successes++
 	elapsed := now.Sub(c.start)
-	if elapsed < 3*time.Second || c.successes < 4 || c.bytes == 0 {
+	if elapsed < 3*time.Second || c.successes < 3*c.limit || c.bytes == 0 {
 		return
 	}
+	// Three cohorts scale the observation interval with actual completion
+	// cadence and avoid judging a probe from a partial simultaneous batch.
 	rate := float64(c.bytes) / elapsed.Seconds()
 	c.resetWindow()
 	c.start = now
@@ -104,6 +117,7 @@ func (c *adaptiveController) observe(s transferSample, demand bool) {
 			c.cooldown = now.Add(3 * time.Second)
 		}
 		c.probeFrom = 0
+		c.eligibleAfter = time.Time{}
 		c.previous = 0
 		c.stable = 0
 		return
@@ -125,6 +139,8 @@ func (c *adaptiveController) observe(s transferSample, demand bool) {
 	if c.limit < c.resource {
 		c.probeFrom = c.limit
 		c.limit++
+		c.eligibleAfter = now
+		c.resetWindow()
 		c.reason = "Testing one additional request"
 	} else {
 		c.reason = "Within the current request ceiling"
