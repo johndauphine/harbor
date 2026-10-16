@@ -71,7 +71,7 @@ func validateTransferCheckpoint(t Transfer) error {
 	}
 	if c.Kind == "upload" {
 		decoded, err := hex.DecodeString(c.SourceHash)
-		if c.ChunkSize != resumableUploadPartSize || err != nil || len(decoded) != sha256.Size || checkpointChunks(c) > 10000 {
+		if !validUploadPartSize(c.ChunkSize) || err != nil || len(decoded) != sha256.Size || checkpointChunks(c) > 10000 {
 			return errors.New("Invalid upload checkpoint")
 		}
 	}

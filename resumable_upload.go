@@ -18,11 +18,23 @@ import (
 	"github.com/aws/smithy-go"
 )
 
-const resumableUploadPartSize int64 = 5 << 20
+const resumableUploadPartSize int64 = 16 << 20
+const resumableUploadConcurrency = 8
+
+func validUploadPartSize(size int64) bool { return size == 5<<20 || size == 16<<20 || size == 32<<20 }
 
 // Durable staging remains the source of truth. Only parts acknowledged by both
 // the journal and S3 may be skipped, and the whole staged source is rehashed.
-func (a *App) resumableUpload(ctx context.Context, c *s3.Client, t Transfer, file *os.File, size int64) (resultErr error) {
+func (a *App) resumableUpload(ctx context.Context, c *s3.Client, t Transfer, file *os.File, size int64) error {
+	return a.uploadMultipart(ctx, c, t, file, size, resumableUploadPartSize, resumableUploadConcurrency)
+}
+
+// Settings are selected when an upload begins. A recovered upload retains its
+// journaled part size, so tuning a later build cannot invalidate older parts.
+func (a *App) uploadMultipart(ctx context.Context, c *s3.Client, t Transfer, file *os.File, size, partSize int64, concurrency int) (resultErr error) {
+	if !validUploadPartSize(partSize) || concurrency < 1 || concurrency > 8 {
+		return errors.New("Invalid multipart settings")
+	}
 	defer func() {
 		if resultErr == nil {
 			return
@@ -128,7 +140,7 @@ func (a *App) resumableUpload(ctx context.Context, c *s3.Client, t Transfer, fil
 		}
 	}
 	if cp == nil || t.multipartID == "" {
-		cp = &transferCheckpoint{Version: 1, Kind: "upload", Scope: scope, Size: size, ChunkSize: resumableUploadPartSize, FileAttempt: t.attempt, SourceHash: sourceHash, Blocks: map[int]string{}}
+		cp = &transferCheckpoint{Version: 1, Kind: "upload", Scope: scope, Size: size, ChunkSize: partSize, FileAttempt: t.attempt, SourceHash: sourceHash, Blocks: map[int]string{}}
 		owner := &cleanupUploadClient{Client: c, app: a, transfer: t, scope: scope}
 		created, e := owner.CreateMultipartUpload(ctx, &s3.CreateMultipartUploadInput{Bucket: aws.String(t.Bucket), Key: aws.String(t.Key), Metadata: map[string]string{"harbor-transfer": t.ID, "harbor-sha256": sourceHash}})
 		if e != nil {
@@ -157,7 +169,7 @@ func (a *App) resumableUpload(ctx context.Context, c *s3.Client, t Transfer, fil
 	var group sync.WaitGroup
 	fail := func(err error) { once.Do(func() { firstErr = err; cancel() }) }
 	slots := a.transferSlots()
-	for worker := 0; worker < min(5, checkpointChunks(cp)); worker++ {
+	for worker := 0; worker < min(concurrency, checkpointChunks(cp)); worker++ {
 		group.Add(1)
 		go func() {
 			defer group.Done()

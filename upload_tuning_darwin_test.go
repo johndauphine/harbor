@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -26,21 +27,50 @@ func TestAWSUploadTuning(t *testing.T) {
 	if os.Getenv("HARBOR_AWS_TUNING") != "1" {
 		t.Skip("set HARBOR_AWS_TUNING=1 for real AWS upload experiments")
 	}
+	size := int64(1 << 30)
+	if value := os.Getenv("HARBOR_TUNING_SIZE_MIB"); value != "" {
+		mib, err := strconv.ParseInt(value, 10, 64)
+		if err != nil || (mib != 512 && mib != 1024 && mib != 5120) {
+			t.Fatal("tuning size must be 512, 1024 or 5120 MiB")
+		}
+		size = mib << 20
+	}
 	root := t.TempDir()
 	a, p, c := perfAWSConnection(t, root)
 	defer a.shutdown(context.Background())
 	bucket := "harbor-tuning-" + id()
 	_, err := a.CreateBucket(p.ID, bucket)
 	mustPerf(t, err)
-	variants := []struct {
+	type uploadVariant struct {
 		name        string
 		seek        bool
 		part        int64
 		concurrency int
-	}{{"buffered-default", false, 5 << 20, 5}, {"seekable-default", true, 5 << 20, 5}, {"seekable-32MiB-8", true, 32 << 20, 8}}
+	}
+	variants := []uploadVariant{{"buffered-default", false, 5 << 20, 5}, {"seekable-default", true, 5 << 20, 5}, {"seekable-32MiB-8", true, 32 << 20, 8}}
+	if os.Getenv("HARBOR_TUNING_UPLOAD_ONLY") == "1" {
+		variants = []uploadVariant{{"seekable-5MiB-5", true, 5 << 20, 5}, {"seekable-5MiB-8", true, 5 << 20, 8}, {"seekable-16MiB-8", true, 16 << 20, 8}, {"seekable-32MiB-8", true, 32 << 20, 8}}
+	}
 	defer func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
+		owned := map[string]bool{}
+		for _, v := range variants {
+			owned[v.name] = true
+		}
+		uploads, e := c.ListMultipartUploads(ctx, &s3.ListMultipartUploadsInput{Bucket: aws.String(bucket)})
+		if e != nil {
+			t.Error(e)
+		} else {
+			for _, u := range uploads.Uploads {
+				if owned[aws.ToString(u.Key)] {
+					_, e = c.AbortMultipartUpload(ctx, &s3.AbortMultipartUploadInput{Bucket: aws.String(bucket), Key: u.Key, UploadId: u.UploadId})
+					if e != nil {
+						t.Error(e)
+					}
+				}
+			}
+		}
 		for _, v := range variants {
 			if _, e := c.DeleteObject(ctx, &s3.DeleteObjectInput{Bucket: aws.String(bucket), Key: aws.String(v.name)}); e != nil {
 				t.Error(e)
@@ -53,11 +83,11 @@ func TestAWSUploadTuning(t *testing.T) {
 	source := filepath.Join(root, "source.bin")
 	f, err := os.Create(source)
 	mustPerf(t, err)
-	_, err = io.CopyN(f, rand.Reader, 1<<30)
+	_, err = io.CopyN(f, rand.Reader, size)
 	mustPerf(t, err)
 	mustPerf(t, f.Sync())
 	f.Close()
-	expected := perfHash(t, source, 1<<30)
+	expected := perfHash(t, source, size)
 	report := os.Getenv("HARBOR_PERFORMANCE_REPORT")
 	if report == "" {
 		report = filepath.Join("dist", "aws-performance")
@@ -92,25 +122,39 @@ func TestAWSUploadTuning(t *testing.T) {
 			meter := startPerfMeter()
 			started := time.Now()
 			_, e = manager.NewUploader(c, func(u *manager.Uploader) { u.PartSize = v.part; u.Concurrency = v.concurrency }).Upload(context.Background(), &s3.PutObjectInput{Bucket: aws.String(bucket), Key: aws.String(v.name), Body: body})
-			record := meter.stop(v.name, "1024MiB", trial+1, 1<<30, time.Since(started), 0)
+			record := meter.stop(v.name, fmt.Sprintf("%dMiB", size>>20), trial+1, size, time.Since(started), 0)
 			file.Close()
 			mustPerf(t, e)
 			mustPerf(t, enc.Encode(record))
 			out.Sync()
-			object, e := c.GetObject(context.Background(), &s3.GetObjectInput{Bucket: aws.String(bucket), Key: aws.String(v.name)})
-			mustPerf(t, e)
-			h := sha256.New()
-			n, e := io.Copy(h, object.Body)
-			object.Body.Close()
-			mustPerf(t, e)
-			if n != 1<<30 || hex.EncodeToString(h.Sum(nil)) != expected {
-				t.Fatal("experiment checksum mismatch")
+			// Verify through the already checked production range downloader so
+			// single-stream reads do not dominate this upload-only experiment.
+			if os.Getenv("HARBOR_TUNING_UPLOAD_ONLY") == "1" {
+				result, e := a.QueueDownloadTo(p.ID, bucket, v.name, root, "verify.bin", true)
+				mustPerf(t, e)
+				perfWait(t, a, result.ID, "completed")
+				if perfHash(t, result.Path, size) != expected {
+					t.Fatal("experiment checksum mismatch")
+				}
+				mustPerf(t, os.Remove(result.Path))
+			} else {
+				object, e := c.GetObject(context.Background(), &s3.GetObjectInput{Bucket: aws.String(bucket), Key: aws.String(v.name)})
+				mustPerf(t, e)
+				h := sha256.New()
+				n, e := io.Copy(h, object.Body)
+				object.Body.Close()
+				mustPerf(t, e)
+				if n != size || hex.EncodeToString(h.Sum(nil)) != expected {
+					t.Fatal("experiment checksum mismatch")
+				}
 			}
 			t.Logf("%s run %d: %.2fs, %.1f MiB/s, heap %.1f MiB, allocated %.1f MiB, CPU %.2fs; SHA-256 matched", v.name, trial+1, record.Seconds, record.MiBPerSecond, record.PeakHeapMiB, record.AllocatedMiB, record.CPUSeconds)
 		}
 	}
-	perfRangeExperiments(t, c, bucket, variants[0].name, root, expected, enc, out)
-	t.Log("Controlled upload and download experiments complete; temporary AWS bucket cleaned on exit")
+	if os.Getenv("HARBOR_TUNING_UPLOAD_ONLY") != "1" {
+		perfRangeExperiments(t, c, bucket, variants[0].name, root, expected, enc, out)
+	}
+	t.Log("Controlled experiments complete; temporary AWS bucket cleaned on exit")
 }
 
 // Range reads are pinned to the same immutable ETag and checked for exact lengths.

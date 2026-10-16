@@ -229,3 +229,61 @@ func TestMinIOUploadCheckpointFailures(t *testing.T) {
 		})
 	}
 }
+
+func TestMinIOLegacyUploadPartsResumeAfterTuning(t *testing.T) {
+	f := newMinIOResilience(t)
+	f.payload = make([]byte, 96<<20)
+	for i := range f.payload {
+		f.payload[i] = byte((i*31 + i/7919) % 251)
+	}
+	tr := journalEntry(t, f.a, f.profile, "upload", "legacy-parts.bin")
+	tr.Bucket = f.bucket
+	tr.Total = int64(len(f.payload))
+	f.keys = append(f.keys, tr.Key)
+	if err := os.WriteFile(tr.Path, f.payload, 0600); err != nil {
+		t.Fatal(err)
+	}
+	checkpoint(t, f.a, tr)
+	f.setFault("drop-part-always")
+	file, err := os.Open(tr.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = f.a.uploadMultipart(context.Background(), f.client, *tr, file, tr.Total, 5<<20, 5)
+	file.Close()
+	if err == nil || tr.checkpoint == nil || !tr.Resumable {
+		t.Fatal("legacy checkpoint was not established", err)
+	}
+	tr.Status = "failed"
+	checkpoint(t, f.a, tr)
+	if tr.checkpoint.ChunkSize != 5<<20 {
+		t.Fatal("legacy part size changed")
+	}
+	f.setFault("")
+	previous := f.a
+	if err = previous.shutdown(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	f.a = NewApp()
+	f.a.configFile = previous.configFile
+	f.a.secretGet = previous.secretGet
+	f.a.secretSet = previous.secretSet
+	f.a.secretDelete = previous.secretDelete
+	if err = f.a.startup(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := f.a.shutdown(context.Background()); err != nil {
+			t.Error(err)
+		}
+	})
+	if err = f.a.RetryTransfer(tr.ID); err != nil {
+		t.Fatal(err)
+	}
+	result := minioWait(t, f.a, tr.ID)
+	if result.Status != "completed" || result.ResumedBytes <= 0 {
+		t.Fatalf("legacy retry did not resume: %+v", result)
+	}
+	f.verifyObject(tr.Key)
+	f.assertNoMultipart()
+}
