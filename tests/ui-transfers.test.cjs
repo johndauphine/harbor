@@ -164,3 +164,17 @@ test('transfer tray reveals new work and recovered interruptions while respectin
  const restarted=await transferFixture();await restarted.setTransfers([transfer({Status:'failed',Error:'Interrupted when Harbor stopped.'})]);assert.equal(restarted.get('transfer-panel').open,true,'first poll after restart must reveal recovered failures');
  const cleanup=await transferFixture();await cleanup.setTransfers([transfer({Status:'completed',CleanupError:'Offline cleanup pending'})]);assert.equal(cleanup.get('transfer-panel').open,true,'initial recovered cleanup warnings also need attention');
 });
+
+test('checkpoint recovery explains resume and distinguishes acknowledged upload progress',async()=>{
+ const h=await transferFixture();
+ await h.setTransfers([transfer({Status:'failed',Resumable:true,Done:40*1024*1024,Total:96*1024*1024})]);
+ const row=h.get('transfers').children[0];
+ assert.match(row.children[2].textContent,/Retry resumes verified completed parts/);
+ assert.doesNotMatch(row.children[2].textContent,/restarts/);
+ await h.setTransfers([transfer({Status:'running',Acknowledged:true,ResumedBytes:40*1024*1024,Done:1024,Total:1024})]);
+ assert.match(part(row,'metrics').textContent,/acknowledged.*awaiting storage confirmation/);
+ assert.match(part(row,'progress').attributes['aria-valuetext'],/acknowledged by storage/);
+ assert.match(row.children[2].textContent,/Reused 40 MiB of verified progress/);
+ await h.setTransfers([transfer({Status:'cancelled',Resumable:false})]);
+ assert.match(row.children[2].textContent,/Retry restarts/);
+});

@@ -226,12 +226,12 @@ async function transfers(){
    if(total||t.Status==='completed')entry.progress.value=total?done:1;
    else if(entry.progress.removeAttribute)entry.progress.removeAttribute('value');
    entry.progress.hidden=t.Status==='completed';
-   entry.metrics.textContent=awaiting?(t.Direction==='upload'?formatBytes(done)+' read · awaiting storage confirmation':formatBytes(done)+' received · awaiting completion'):total?formatBytes(done)+' of '+formatBytes(total)+' · '+Math.floor(done/total*100)+'%':formatBytes(done)+' transferred';
-   entry.progress.setAttribute('aria-valuetext',awaiting?(t.Direction==='upload'?formatBytes(done)+' source bytes read; upload still in progress':formatBytes(done)+' received; download still in progress'):entry.metrics.textContent);
+   entry.metrics.textContent=awaiting?(t.Direction==='upload'?formatBytes(done)+(t.Acknowledged?' acknowledged · awaiting storage confirmation':' read · awaiting storage confirmation'):formatBytes(done)+' received · awaiting completion'):total?formatBytes(done)+' of '+formatBytes(total)+' · '+Math.floor(done/total*100)+'%':formatBytes(done)+' transferred';
+   entry.progress.setAttribute('aria-valuetext',awaiting?(t.Direction==='upload'?formatBytes(done)+(t.Acknowledged?' acknowledged by storage; upload still in progress':' source bytes read; upload still in progress'):formatBytes(done)+' received; download still in progress'):entry.metrics.textContent);
    entry.error.textContent=t.Error||'';entry.error.hidden=!t.Error;
    entry.timestamp.textContent=t.CreatedAt&&!t.CreatedAt.startsWith('0001-')?'Queued '+new Date(t.CreatedAt).toLocaleString():'';
    const saved=t.SavedPath?'Saved to '+t.SavedPath+(t.SavedAt&&!t.SavedAt.startsWith('0001-')?' · '+new Date(t.SavedAt).toLocaleString():''):'';
-   const noticeText=[saved,t.SaveError?'Save failed: '+t.SaveError:'',t.CleanupError||'',['failed','cancelled'].includes(t.Status)?'Retry restarts this transfer from the beginning.':''].filter(Boolean).join(' — ');
+   const noticeText=[saved,t.SaveError?'Save failed: '+t.SaveError:'',t.CleanupError||'',['failed','cancelled'].includes(t.Status)?(t.Resumable?'Retry resumes verified completed parts.':'Retry restarts this transfer from the beginning.'):'',Number(t.ResumedBytes)>0?'Reused '+formatBytes(t.ResumedBytes)+' of verified progress':''].filter(Boolean).join(' — ');
    if(entry.notice.textContent!==noticeText)entry.notice.textContent=noticeText;
    entry.notice.className='transfer-notice'+(t.SaveError||t.CleanupError?' transfer-save-error':'');
    entry.notice.hidden=!entry.notice.textContent;

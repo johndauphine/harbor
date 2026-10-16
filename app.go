@@ -67,6 +67,11 @@ type Transfer struct {
 	multipartID    string
 	multipartScope string
 	partialPath    string
+	checkpoint     *transferCheckpoint
+	userCancelled  bool
+	Acknowledged   bool
+	Resumable      bool
+	ResumedBytes   int64
 	CleanupError   string
 	attempt        uint64
 	destination    *downloadTarget
@@ -97,6 +102,7 @@ type App struct {
 	workers          sync.WaitGroup
 	operations       map[string]context.CancelFunc
 	shutdownDone     chan struct{}
+	rangeSlots       chan struct{}
 	profiles         []Profile
 	transfers        map[string]*Transfer
 	transferOrder    []string
@@ -505,6 +511,11 @@ func (a *App) client(ctx context.Context, profileID string) (*s3.Client, error) 
 	if err != nil {
 		return nil, fmt.Errorf("Credential vault: %w", err)
 	}
+	return configuredS3Client(ctx, p, raw)
+}
+
+func configuredS3Client(ctx context.Context, p Profile, raw string) (*s3.Client, error) {
+	var err error
 	var s Secret
 	if err = json.Unmarshal([]byte(raw), &s); err != nil {
 		return nil, err
@@ -678,7 +689,12 @@ func (a *App) Transfers() []Transfer {
 func (a *App) CancelTransfer(id string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if t := a.transfers[id]; t != nil {
+	if t := a.transfers[id]; t != nil && (t.Status == "running" || t.Status == "queued") {
+		t.userCancelled = true
+		t.Resumable = false
+		if err := a.persistTransferLocked(t); err != nil {
+			log.Print(err)
+		}
 		if t.cancel != nil {
 			t.cancel()
 		} else if t.Status == "queued" {
@@ -720,9 +736,52 @@ func (a *App) RetryTransfer(id string) error {
 		return err
 	}
 	t := a.transfers[id]
-	if err := a.removePartial(t); err != nil {
+	if t.userCancelled && t.checkpoint != nil {
+		spec := *t
 		a.mu.Unlock()
-		return err
+		cleanup, cancel := context.WithTimeout(a.ctx, 5*time.Second)
+		var err error
+		if spec.multipartID != "" {
+			var selected Profile
+			for _, p := range a.profiles {
+				if p.ID == spec.ProfileID {
+					selected = p
+				}
+			}
+			raw, getErr := a.secretGet(credentialID(selected))
+			err = getErr
+			if err == nil {
+				var c *s3.Client
+				c, err = configuredS3Client(cleanup, selected, raw)
+				if err == nil {
+					err = a.cleanupMultipartWithClient(cleanup, c, spec)
+				}
+			}
+		}
+		cancel()
+		if err != nil {
+			return err
+		}
+		if spec.Direction == "download" {
+			err = a.discardDownloadCheckpoint(spec)
+		} else {
+			err = a.storeCheckpoint(spec, nil, "")
+		}
+		if err != nil {
+			return err
+		}
+		a.mu.Lock()
+		if err = a.retryErrorLocked(id); err != nil {
+			a.mu.Unlock()
+			return err
+		}
+		t = a.transfers[id]
+	}
+	if t.checkpoint == nil {
+		if err := a.removePartial(t); err != nil {
+			a.mu.Unlock()
+			return err
+		}
 	}
 	if t.Direction == "upload" && t.multipartID == "" {
 		if _, err := os.Stat(t.Path); err != nil {
@@ -732,6 +791,8 @@ func (a *App) RetryTransfer(id string) error {
 	}
 	previous := *t
 	t.attempt++
+	t.userCancelled = false
+	t.ResumedBytes = 0
 	attempt := t.attempt
 	t.Status = "queued"
 	t.Done = 0
@@ -879,6 +940,9 @@ func (a *App) execute(ctx context.Context, t Transfer) error {
 			return e
 		}
 		total(st.Size())
+		if a.journalEnabled && (st.Size() >= parallelDownloadThreshold || t.checkpoint != nil) {
+			return a.resumableUpload(ctx, c, t, f, st.Size())
+		}
 		uploadClient := &cleanupUploadClient{Client: c}
 		if a.journalEnabled {
 			uploadClient.app = a
@@ -891,9 +955,30 @@ func (a *App) execute(ctx context.Context, t Transfer) error {
 		}
 		return e
 	}
+	rangeFallback := false
+	if a.journalEnabled && t.checkpoint != nil && t.checkpoint.Kind == "download" {
+		handled, err := a.parallelDownload(ctx, c, t, nil)
+		if handled {
+			return err
+		}
+		rangeFallback = true
+		t.checkpoint, t.partialPath = nil, ""
+	}
 	v, e := c.GetObject(ctx, &s3.GetObjectInput{Bucket: aws.String(t.Bucket), Key: aws.String(t.Key)})
 	if e != nil {
 		return e
+	}
+	if a.journalEnabled && !rangeFallback && aws.ToInt64(v.ContentLength) >= parallelDownloadThreshold && aws.ToString(v.ETag) != "" {
+		v.Body.Close()
+		handled, err := a.parallelDownload(ctx, c, t, v)
+		if handled {
+			return err
+		}
+		t.checkpoint, t.partialPath = nil, ""
+		v, e = c.GetObject(ctx, &s3.GetObjectInput{Bucket: aws.String(t.Bucket), Key: aws.String(t.Key), IfMatch: v.ETag, VersionId: v.VersionId})
+		if e != nil {
+			return e
+		}
 	}
 	defer v.Body.Close()
 	total(aws.ToInt64(v.ContentLength))

@@ -26,6 +26,8 @@ type transferRecord struct {
 	MultipartID    string
 	MultipartScope string
 	PartialPath    string
+	Checkpoint     *transferCheckpoint
+	UserCancelled  bool
 }
 
 func (a *App) transferCacheDir() (string, error) {
@@ -52,7 +54,7 @@ func (a *App) persistTransferLocked(t *Transfer) error {
 	if !a.journalEnabled {
 		return nil
 	}
-	raw, err := json.Marshal(transferRecord{Transfer: *t, Attempt: t.attempt, Destination: t.destination, MultipartID: t.multipartID, MultipartScope: t.multipartScope, PartialPath: t.partialPath})
+	raw, err := json.Marshal(transferRecord{Transfer: *t, Attempt: t.attempt, Destination: t.destination, MultipartID: t.multipartID, MultipartScope: t.multipartScope, PartialPath: t.partialPath, Checkpoint: t.checkpoint, UserCancelled: t.userCancelled})
 	if err != nil {
 		return err
 	}
@@ -69,11 +71,15 @@ func (a *App) persistTransferLocked(t *Transfer) error {
 }
 
 func (a *App) partialDownloadPath(t Transfer) string {
+	epoch := t.attempt
+	if t.checkpoint != nil && t.checkpoint.Kind == "download" {
+		epoch = t.checkpoint.FileAttempt
+	}
 	directory := filepath.Dir(t.Path)
 	if t.destination != nil {
 		directory = filepath.Dir(t.destination.Path)
 	}
-	return filepath.Join(directory, ".harbor-download-"+t.ID+"-"+strconv.FormatUint(t.attempt, 10))
+	return filepath.Join(directory, ".harbor-download-"+t.ID+"-"+strconv.FormatUint(epoch, 10))
 }
 
 func validTransferID(s string) bool {
@@ -118,6 +124,13 @@ func (a *App) recoverTransfers(db *sql.DB) error {
 		}
 		t := r.Transfer
 		t.attempt, t.destination, t.multipartID, t.multipartScope, t.partialPath = r.Attempt, r.Destination, r.MultipartID, r.MultipartScope, r.PartialPath
+		t.checkpoint = r.Checkpoint
+		t.userCancelled = r.UserCancelled
+		if err := validateTransferCheckpoint(t); err != nil {
+			rows.Close()
+			return err
+		}
+		t.Resumable = t.checkpoint != nil && len(t.checkpoint.Blocks) > 0
 		if !validTransferID(t.ID) || t.ID != key || (t.Direction != "upload" && t.Direction != "download") || t.attempt == 0 || filepath.Dir(t.Path) != a.transferCache || (t.Direction == "upload" && !strings.HasPrefix(filepath.Base(t.Path), "upload-")) || (t.Direction == "download" && !strings.HasPrefix(filepath.Base(t.Path), "download-")) || (t.partialPath != "" && t.partialPath != a.partialDownloadPath(t)) {
 			rows.Close()
 			return errors.New("Invalid transfer journal paths or transfer metadata; preserve the configuration for recovery")
@@ -125,7 +138,7 @@ func (a *App) recoverTransfers(db *sql.DB) error {
 		switch t.Status {
 		case "queued", "running":
 			t.Status = "failed"
-			t.Error = "Interrupted when Harbor stopped. Retry to restart this transfer."
+			t.Error = "Interrupted when Harbor stopped. Retry to recover this transfer."
 		case "failed", "cancelled", "completed":
 		default:
 			rows.Close()
@@ -147,8 +160,19 @@ func (a *App) recoverTransfers(db *sql.DB) error {
 			referenced[t.Path] = true
 		}
 		t.CleanupError = ""
-		if err = a.removePartial(t); err != nil {
-			t.CleanupError = err.Error()
+		if t.userCancelled && t.checkpoint != nil {
+			if err = a.removePartial(t); err != nil {
+				return err
+			}
+			t.checkpoint = nil
+			t.Resumable = false
+		}
+		if t.checkpoint == nil {
+			if err = a.removePartial(t); err != nil {
+				t.CleanupError = err.Error()
+			}
+		} else if t.partialPath != "" && filepath.Dir(t.partialPath) == a.transferCache {
+			referenced[t.partialPath] = true
 		}
 		if err = a.persistTransferLocked(t); err != nil {
 			return err
@@ -172,7 +196,7 @@ func (a *App) recoverTransfers(db *sql.DB) error {
 	defer cancel()
 	for _, transferID := range a.transferOrder {
 		t := a.transfers[transferID]
-		if t.multipartID != "" {
+		if t.multipartID != "" && t.checkpoint == nil {
 			if err = a.cleanupMultipart(ctx, *t); err != nil {
 				t.CleanupError = "Remote multipart cleanup pending; Retry when the connection is available."
 				if err = a.persistTransferLocked(t); err != nil {
@@ -245,10 +269,17 @@ func (a *App) cleanupMultipart(ctx context.Context, t Transfer) error {
 	if err != nil {
 		return err
 	}
+	return a.cleanupMultipartWithClient(ctx, c, t)
+}
+
+func (a *App) cleanupMultipartWithClient(ctx context.Context, c *s3.Client, t Transfer) error {
+	if t.multipartID == "" {
+		return nil
+	}
 	if t.multipartScope == "" || multipartClientScope(c) != t.multipartScope {
 		return errors.New("Restore this transfer's original connection settings before cleaning up its multipart upload")
 	}
-	_, err = c.AbortMultipartUpload(ctx, &s3.AbortMultipartUploadInput{Bucket: aws.String(t.Bucket), Key: aws.String(t.Key), UploadId: aws.String(t.multipartID)})
+	_, err := c.AbortMultipartUpload(ctx, &s3.AbortMultipartUploadInput{Bucket: aws.String(t.Bucket), Key: aws.String(t.Key), UploadId: aws.String(t.multipartID)})
 	var apiErr smithy.APIError
 	if err != nil && !(errors.As(err, &apiErr) && apiErr.ErrorCode() == "NoSuchUpload") {
 		return fmt.Errorf("Remote multipart cleanup pending: %w", err)
@@ -259,8 +290,10 @@ func (a *App) cleanupMultipart(ctx context.Context, t Transfer) error {
 func (a *App) prepareTransfer(ctx context.Context, t Transfer) error {
 	cleanupCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	if err := a.cleanupMultipart(cleanupCtx, t); err != nil {
-		return err
+	if t.checkpoint == nil {
+		if err := a.cleanupMultipart(cleanupCtx, t); err != nil {
+			return err
+		}
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -270,8 +303,10 @@ func (a *App) prepareTransfer(ctx context.Context, t Transfer) error {
 	}
 	// A partial from the previous attempt must be removed before increasing the
 	// attempt number (RetryTransfer performs that cleanup while holding a.mu).
-	if err := a.removePartial(current); err != nil {
-		return err
+	if current.checkpoint == nil {
+		if err := a.removePartial(current); err != nil {
+			return err
+		}
 	}
 	current.CleanupError = ""
 	return a.persistTransferLocked(current)

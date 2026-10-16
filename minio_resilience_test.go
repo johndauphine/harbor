@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -84,6 +85,12 @@ func newMinIOResilience(t *testing.T) *minioResilience {
 	}
 	proxy.ModifyResponse = func(r *http.Response) error {
 		fault, release, reached := f.getFault()
+		if fault == "lose-completion" && r.Request.Method == "POST" && r.Request.URL.Query().Get("uploadId") != "" && r.StatusCode == 200 {
+			return errors.New("injected lost completion response")
+		}
+		if fault == "hold-ranges" && r.Request.Method == "GET" && r.StatusCode == 206 && !strings.HasPrefix(r.Header.Get("Content-Range"), "bytes 0-") {
+			r.Body = &minioFaultBody{ReadCloser: r.Body, remaining: 256 << 10, hold: true, release: release, reached: reached, ctx: r.Request.Context(), hits: &f.hits}
+		}
 		if r.Request.Method == "GET" && r.Request.URL.Path == "/"+f.bucket+"/download.bin" && r.StatusCode == 200 {
 			if fault == "truncate-download" || fault == "hold-download" {
 				r.Body = &minioFaultBody{ReadCloser: r.Body, remaining: 256 << 10, hold: fault == "hold-download", release: release, reached: reached, ctx: r.Request.Context(), hits: &f.hits}
@@ -99,7 +106,7 @@ func newMinIOResilience(t *testing.T) *minioResilience {
 		}
 		part := r.Method == "PUT" && r.URL.Query().Get("partNumber") != ""
 		if part && r.URL.Query().Get("partNumber") == "2" {
-			if fault == "drop-part-once" && f.hits.CompareAndSwap(0, 1) {
+			if fault == "drop-part-always" || fault == "drop-part-once" && f.hits.CompareAndSwap(0, 1) {
 				_, _ = io.CopyN(io.Discard, r.Body, 128<<10)
 				disconnectMinIO(w)
 				return
