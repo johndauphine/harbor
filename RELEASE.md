@@ -31,7 +31,7 @@ python3 scripts/package_release.py --version v0.1.0-rc.1 --output dist
 
 Choose the version for the candidate being evaluated. The script rejects modified source for candidate and release labels. Developers may use `--version development-local --allow-dirty`; those archives explicitly record the modified-source state. The script builds all four targets with embedded version labels, normalizes archive timestamps/ownership/permissions, includes build metadata and a short startup guide, and writes checksums. Repeated packaging with the same source, compiler, Python/compression runtime and options is repeatable. Signing/timestamping changes the final bytes.
 
-Each archive contains only the executable, `README.txt`, `build-info.json`, Harbor's Apache 2.0 `LICENSE`, and `THIRD_PARTY_NOTICES.txt`. No settings, credentials, caches, session URLs or test data are included. `--version` reports the label, Git revision, toolchain and target. CI uses a development revision label and uploads the archives as workflow artifacts; it does not publish releases.
+Each archive contains only the executable, `README.txt`, `UPGRADE.md`, `build-info.json`, Harbor's Apache 2.0 `LICENSE`, and `THIRD_PARTY_NOTICES.txt`. No settings, credentials, caches, session URLs or test data are included. `--version` reports the label, Git revision, toolchain and target. CI uses a development revision label and uploads the archives as workflow artifacts; it does not publish releases.
 
 ## Preserving dependency notices
 
@@ -73,7 +73,8 @@ Use `python scripts/check_archive.py dist\harbor-v0.1.0-rc.1-windows-amd64.zip` 
 | --- | --- | --- |
 | `darwin-arm64.tar.gz` | Apple Silicon macOS | Local Safari/Chrome application checks; native archive extraction/startup checks must pass for each candidate. |
 | `windows-arm64.zip` | Windows 11 ARM64 | Earlier Edge application checks in the Parallels Windows ARM VM; repeat against the final candidate archive. |
-| `windows-amd64.zip` | Windows 11 x64 | Hosted Windows x64 Go tests and earlier Edge checks under ARM emulation; full native x64 browser/file workflow coverage remains a release-validation task. |
+| `windows-amd64.zip` | Windows 11 x64 | Native hosted backend and Chrome/Edge mocked-browser regressions; full native x64 real-storage file workflows remain a release-validation task. |
+| `linux-amd64.tar.gz` | Linux x64 desktop | Native hosted backend, mocked-browser and archive startup tests; interactive desktop and real Secret Service integration remain unverified. |
 
 Intel macOS and Linux ARM64 executables are not included. Linux x64 packaging is supported; an unlocked Secret Service login keyring, user D-Bus session and system CA certificates are required. `xdg-open` is optional when using `--no-browser`. Full interactive Linux desktop/keyring coverage is not yet established. No minimum macOS version or Windows version below Windows 11 has been established. ARM emulation checks do not establish native x64 browser coverage. State these limits alongside a candidate rather than implying wider compatibility.
 
@@ -91,7 +92,7 @@ Intel macOS and Linux ARM64 executables are not included. Linux x64 packaging is
 
 ## Publisher signing prerequisites
 
-- **macOS:** Apple Developer membership alone is insufficient. The publisher needs a valid **Developer ID Application** signing identity and its private key, hardened-runtime signing, timestamping, and an authorized notarization workflow. The developer membership is currently expired and no valid local signing identity was available during this preparation; renewal and an appropriate identity are prerequisites for Apple notarization. Signing and notarization must be completed and checked before describing a download as Developer ID signed or notarized. See [Apple's distribution-signing guide](https://developer.apple.com/documentation/xcode/creating-distribution-signed-code-for-the-mac/) and [notarization guide](https://developer.apple.com/documentation/security/notarizing-macos-software-before-distribution).
+- **macOS:** Apple Developer membership alone is insufficient. The publisher needs a valid **Developer ID Application** signing identity and its private key, hardened-runtime signing, timestamping, and an authorized notarization workflow. The owner confirmed that the developer membership is inactive and chose explicitly unsigned distribution for v1.0.0; no valid local signing identity was available during preparation. Renewal and an appropriate identity are prerequisites for future Apple notarization. Signing and notarization must be completed and checked before describing a download as Developer ID signed or notarized. See [Apple's distribution-signing guide](https://developer.apple.com/documentation/xcode/creating-distribution-signed-code-for-the-mac/) and [notarization guide](https://developer.apple.com/documentation/security/notarizing-macos-software-before-distribution).
 - **Windows:** These builds have no publisher signature. Authenticode signing requires a publisher-controlled certificate/private key or an approved signing service, with timestamping and verification. Signing does not guarantee the absence of SmartScreen reputation warnings. See [Microsoft SignTool documentation](https://learn.microsoft.com/en-us/windows/win32/seccrypto/signtool).
 
 Keep signing keys and notarization credentials out of the repository and build artifacts. No developer-account login, certificate issuance, signing-service setup or release publication is automated by this repository's current CI.

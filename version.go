@@ -9,6 +9,11 @@ import (
 // Release builds may set version with -ldflags '-X main.version=vX.Y.Z'.
 var version = "development"
 
+// Packaging sets these explicitly because Go does not detect linked Git worktrees.
+// Ordinary builds retain the toolchain-provided VCS information below.
+var releaseRevision string
+var releaseModified string
+
 func versionText() string {
 	revision := "unknown"
 	modified := false
@@ -21,6 +26,10 @@ func versionText() string {
 				modified = setting.Value == "true"
 			}
 		}
+	}
+	if releaseRevision != "" {
+		revision = releaseRevision
+		modified = releaseModified == "true"
 	}
 	if len(revision) > 12 {
 		revision = revision[:12]
