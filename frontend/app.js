@@ -533,3 +533,28 @@ function renderBuckets(names,owner){
 async function deleteBucket(owner,name){await previewDelete('bucket',owner,name)}
 
 updateWorkspace();
+
+let tuningBusy=false,tuningVersion=0,tuningSavedMode="auto";
+async function refreshTransferTuning(mode){
+ if(tuningBusy&&!mode)return;
+ const version=++tuningVersion;tuningBusy=true;
+ const select=$('tuning-mode');if(mode)select.disabled=true;
+ try{
+  const status=await api(mode?'set-transfer-tuning':'transfer-tuning',mode?{Mode:mode}:{});
+  if(version!==tuningVersion)return;
+  const s=status.Scheduler,r=status.Resources;
+  select.value=s.Mode;tuningSavedMode=s.Mode;
+  const title={auto:'Automatic',observe:'Observation',fixed:'Fixed'}[s.Mode]||'Observation';
+  $('tuning-status').textContent=title+' · '+s.ActiveBulk+' active · '+s.WaitingBulk+' waiting · '+s.BulkLimit+' data request limit'+(s.Mode==='observe'?' · suggested '+s.SuggestedLimit:'');
+  const hardware=[r.LogicalCPUs?r.LogicalCPUs+' logical processors':'',r.MemoryTotalBytes?formatBytes(r.MemoryTotalBytes)+' installed memory':'',r.MemoryKnown?formatBytes(r.MemoryAvailableBytes)+' memory available':'Available memory not measured',r.HeapBytes?formatBytes(r.HeapBytes)+' Go heap':''].filter(Boolean);
+  $('tuning-resources').textContent=hardware.join(' · ');
+  $('tuning-explanation').textContent=s.Mode==='observe'?'Suggested changes are measured while keeping proven defaults.':s.Mode==='fixed'?'Using the proven parallel request settings.':status.ResourceReason&&status.ResourceReason!=='within resource limits'?'Reducing activity: '+status.ResourceReason:/throttl/i.test(s.Reason)?'Storage asked Harbor to slow down.':'Learning from completed transfers.';
+  select.dataset.commandLineOverride=status.CommandLineOverride?'true':'false';
+  if(status.CommandLineOverride)$('tuning-explanation').textContent='Automatic tuning is disabled by --no-auto-tuning for this launch. Restart Harbor without that option to change modes.';
+  $('tuning-error').textContent='';
+ }catch(error){if(version===tuningVersion){select.value=tuningSavedMode;$('tuning-error').textContent='Performance settings unavailable: '+error.message}}
+ finally{if(version===tuningVersion){tuningBusy=false;select.disabled=select.dataset.commandLineOverride==='true'}}
+}
+$('tuning-panel').ontoggle=()=>{if($('tuning-panel').open)refreshTransferTuning()};
+$('tuning-mode').onchange=()=>refreshTransferTuning($('tuning-mode').value);
+setInterval(()=>{if($('tuning-panel').open)refreshTransferTuning()},5000);

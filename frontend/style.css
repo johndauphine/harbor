@@ -1847,3 +1847,10 @@ button.destructive:hover {
 #new-bucket { padding:4px 7px; min-height:28px; font-size:11px; }
 #bucket-dialog { width:640px; }
 #bucket-error { color:var(--danger); overflow-wrap:anywhere; }
+
+.tuning-panel {margin:8px 16px;border:1px solid var(--border);border-radius:var(--radius);background:var(--surface)}
+.tuning-panel>summary {padding:10px 12px;cursor:pointer;color:var(--control-text)}
+.tuning-content {padding:0 12px 12px;max-width:900px}
+.tuning-content>label {display:block;font-weight:600;margin:8px 0}
+.tuning-content>p {color:var(--muted);margin:8px 0}
+.tuning-content #tuning-error {color:var(--danger)}

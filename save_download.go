@@ -228,6 +228,12 @@ func (a *App) QueueLocalUpload(ctx context.Context, profile, bucket, key, path s
 	if st.Size() > limit {
 		return "", errors.New("Uploads are limited to 5 GiB")
 	}
+	release, err := a.acquireTransferPreparation(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer release()
+	stageStarted := time.Now()
 	source, err := os.Open(path)
 	if err != nil {
 		return "", err
@@ -254,6 +260,7 @@ func (a *App) QueueLocalUpload(ctx context.Context, profile, bucket, key, path s
 		os.Remove(stagedPath)
 		return "", errors.New("Could not stage upload; check file access and the 5 GiB limit")
 	}
+	a.recordTransferPhase("staging", stageStarted)
 	transferID, err := a.queueTransfer("upload", profile, bucket, key, stagedPath)
 	if err != nil {
 		os.Remove(stagedPath)

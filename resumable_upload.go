@@ -71,12 +71,20 @@ func (a *App) uploadMultipart(ctx context.Context, c *s3.Client, t Transfer, fil
 		return err
 	}
 	if !info.Mode().IsRegular() || size > 5<<30 {
-		return errors.New("Staged upload changed or exceeds the 5 GiB limit; choose the local file again")
+		return fmt.Errorf("%w or exceeds the 5 GiB limit; choose the local file again", errStagedUploadChanged)
 	}
-	h := sha256.New()
-	if _, err = io.Copy(h, &contextReader{ctx: ctx, reader: io.NewSectionReader(file, 0, size)}); err != nil {
+	release, err := a.acquireTransferPreparation(ctx)
+	if err != nil {
 		return err
 	}
+	verifyStarted := time.Now()
+	h := sha256.New()
+	if _, err = io.Copy(h, &contextReader{ctx: ctx, reader: io.NewSectionReader(file, 0, size)}); err != nil {
+		release()
+		return err
+	}
+	release()
+	a.recordTransferPhase("source verification", verifyStarted)
 	sourceHash := hex.EncodeToString(h.Sum(nil))
 	if cp != nil && (cp.Size != size || cp.SourceHash != sourceHash) {
 		if err = a.cleanupMultipart(ctx, t); err != nil {
@@ -89,7 +97,7 @@ func (a *App) uploadMultipart(ctx context.Context, c *s3.Client, t Transfer, fil
 		cp = nil
 	}
 	if size < parallelDownloadThreshold {
-		return errors.New("Staged upload size changed; Retry starts a fresh transfer")
+		return fmt.Errorf("%w size; Retry starts a fresh transfer", errStagedUploadChanged)
 	}
 	if cp != nil && t.multipartID != "" {
 		// Completion may have succeeded remotely before its response or the journal
@@ -168,7 +176,6 @@ func (a *App) uploadMultipart(ctx context.Context, c *s3.Client, t Transfer, fil
 	var next atomic.Int64
 	var group sync.WaitGroup
 	fail := func(err error) { once.Do(func() { firstErr = err; cancel() }) }
-	slots := a.transferSlots()
 	for worker := 0; worker < min(concurrency, checkpointChunks(cp)); worker++ {
 		group.Add(1)
 		go func() {
@@ -181,15 +188,13 @@ func (a *App) uploadMultipart(ctx context.Context, c *s3.Client, t Transfer, fil
 				if _, ok := cp.Blocks[index]; ok {
 					continue
 				}
-				select {
-				case slots <- struct{}{}:
-				case <-workCtx.Done():
+				if workCtx.Err() != nil {
 					return
 				}
+				started := time.Now()
 				start := int64(index) * cp.ChunkSize
 				length := min(cp.ChunkSize, size-start)
 				out, e := c.UploadPart(workCtx, &s3.UploadPartInput{Bucket: aws.String(t.Bucket), Key: aws.String(t.Key), UploadId: aws.String(t.multipartID), PartNumber: aws.Int32(int32(index + 1)), ContentLength: aws.Int64(length), Body: io.NewSectionReader(file, start, length)})
-				<-slots
 				if e == nil {
 					if aws.ToString(out.ETag) == "" {
 						e = errors.New("Storage did not acknowledge the uploaded part")
@@ -201,6 +206,7 @@ func (a *App) uploadMultipart(ctx context.Context, c *s3.Client, t Transfer, fil
 					fail(e)
 					return
 				}
+				a.observeUsefulTransfer(workCtx, length, started)
 				a.checkpointProgress(t, acknowledged.Add(length), resumed)
 			}
 		}()
@@ -217,7 +223,7 @@ func (a *App) uploadMultipart(ctx context.Context, c *s3.Client, t Transfer, fil
 		return err
 	}
 	if after.Size() != size || !after.ModTime().Equal(info.ModTime()) {
-		return errors.New("Staged upload changed during transfer; retry to verify the source again")
+		return fmt.Errorf("%w during transfer; retry to verify the source again", errStagedUploadChanged)
 	}
 	a.mu.Lock()
 	completed := cloneCheckpoint(a.transfers[t.ID].checkpoint)

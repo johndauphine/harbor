@@ -1,3 +1,15 @@
+## Implementation update
+
+Harbor now starts in **Automatic** mode unless a saved GUI preference selects another mode. In Transfers → Transfer performance, choose **Fixed** to disable adaptation or **Observe** to measure suggestions while retaining fixed concurrency. The selection survives restart.
+
+Launch Harbor with `--no-auto-tuning` to force fixed settings for that session. This takes precedence over saved preferences, disables the GUI selector with an explanation, and leaves the saved preference untouched. Restart without the switch to restore GUI control.
+
+Automatic mode starts with eight data requests and adapts within one to eight, using verified useful progress, failures, throttling, and available resource measurements. Two independent control-request slots preserve listing and cleanup access. Part sizes and recovery checkpoints are unchanged. Learning resets at launch; only the mode is saved.
+
+Fair request admission applies among up to eight active transfers. A ninth transfer waits until an active transfer finishes; whole-queue fairness is not yet implemented. Resource sensing measures CPU, Go heap, and cache-volume disk space, not process RSS, container limits, or the chosen download destination. Missing available-memory information remains unknown and does not imply exhaustion.
+
+The investigation below records the original proposal. Its opt-in rollout recommendation was superseded by the user's request to make Automatic the default.
+
 # Automatic transfer tuning investigation
 
 Investigation date: 2026-10-16. This is a proposed design, not an implemented feature. No additional network benchmarks were run for this investigation. Measurements reported by the concurrent upload experiment remain evidence for this Mac and connection, not a universal optimum.

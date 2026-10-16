@@ -51,6 +51,8 @@ func (a *App) transferCacheDir() (string, error) {
 // Caller holds a.mu. State is committed before admitting a worker or releasing
 // a remote multipart ID to the SDK. Progress counters need not be fsynced.
 func (a *App) persistTransferLocked(t *Transfer) error {
+	started := time.Now()
+	defer a.recordTransferPhase("checkpoint", started)
 	if !a.journalEnabled {
 		return nil
 	}
@@ -65,7 +67,7 @@ func (a *App) persistTransferLocked(t *Transfer) error {
 	defer db.Close()
 	_, err = db.Exec("INSERT INTO transfers(id,profile_id,metadata) VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET metadata=excluded.metadata", t.ID, t.ProfileID, string(raw))
 	if err != nil {
-		return fmt.Errorf("Save transfer recovery state: %w", err)
+		return fmt.Errorf("%w: %w", errCheckpointPersistence, err)
 	}
 	return nil
 }

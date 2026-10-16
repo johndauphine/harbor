@@ -83,7 +83,11 @@ test('terminal transfers refresh once, preserve selection, and report failures a
  assert.deepEqual(retryRequests,[{ID:'restored'}]);
 });
 
-async function transferFixture(){
+function fixtureTuningStatus(mode='observe',overrides={}){
+ const {Scheduler={},Resources={},...rest}=overrides;
+ return{Scheduler:{Mode:mode,ActiveBulk:2,WaitingBulk:1,BulkLimit:8,SuggestedLimit:4,...Scheduler},Resources:{LogicalCPUs:8,MemoryTotalBytes:48*1024**3,MemoryKnown:false,HeapBytes:8*1024**2,...Resources},ResourceReason:'within resource limits',...rest};
+}
+async function transferFixture(fixtureOptions={}){
  const elements=new Map(),get=id=>{if(!elements.has(id))elements.set(id,new Element());return elements.get(id);};
  let list=[];const requests=[];
  const context={document:{getElementById:get,createElement:tag=>new Element(tag)},location:{hash:'#fixture',pathname:'/'},sessionStorage:{getItem(){},setItem(){}},history:{replaceState(){}},setInterval(){},setTimeout,clearTimeout,URL,URLSearchParams,confirm:()=>true,
@@ -93,6 +97,7 @@ async function transferFixture(){
  else if(route==='browse')result={Objects:[],Next:''};
  else if(route==='transfers')result=list.map(t=>({...t}));
  else if(route==='cancel'||route==='retry')result='queued';
+ else if(route==='transfer-tuning'||route==='set-transfer-tuning')result=fixtureOptions.tuning?await fixtureOptions.tuning(route,data):fixtureTuningStatus(route==='set-transfer-tuning'?data.Mode:'observe');
  else throw Error('Unexpected endpoint '+route);
  return{ok:true,json:async()=>result};}};
  vm.createContext(context);vm.runInContext(fs.readFileSync(path.join(__dirname,'../frontend/app.js'),'utf8'),context);await new Promise(r=>setImmediate(r));
@@ -177,4 +182,65 @@ test('checkpoint recovery explains resume and distinguishes acknowledged upload 
  assert.match(row.children[2].textContent,/Reused 40 MiB of verified progress/);
  await h.setTransfers([transfer({Status:'cancelled',Resumable:false})]);
  assert.match(row.children[2].textContent,/Retry restarts/);
+});
+
+test('performance controls are lazy, show missing-memory measurements honestly, and save explicit mode',async()=>{
+ const h=await transferFixture();
+ assert.equal(h.requests.some(r=>r.route==='transfer-tuning'),false,'closed panel must not add polling');
+ h.get('tuning-panel').open=true;
+ await h.context.refreshTransferTuning();
+ assert.equal(h.get('tuning-mode').value,'observe');
+ assert.match(h.get('tuning-status').textContent,/Observation.*8 data request limit.*suggested 4/);
+ assert.match(h.get('tuning-resources').textContent,/48 GiB installed memory.*Available memory not measured/);
+ await h.context.refreshTransferTuning('auto');
+ assert.equal(h.get('tuning-mode').value,'auto');
+ assert.deepEqual(h.requests.filter(r=>r.route==='set-transfer-tuning').map(r=>r.data),[{Mode:'auto'}]);
+});
+
+test('launch override locks fixed tuning and stays locked when status refresh fails',async()=>{
+ let unavailable=false;
+ const h=await transferFixture({tuning:()=>{
+  if(unavailable)throw Error('Status temporarily unavailable');
+  return fixtureTuningStatus('fixed',{CommandLineOverride:true});
+ }});
+ await h.context.refreshTransferTuning();
+ const select=h.get('tuning-mode');
+ assert.equal(select.value,'fixed');
+ assert.equal(select.disabled,true,'launch override must disable GUI changes');
+ assert.match(h.get('tuning-explanation').textContent,/disabled by --no-auto-tuning for this launch.*Restart Harbor/);
+ unavailable=true;
+ await h.context.refreshTransferTuning();
+ assert.equal(select.value,'fixed');
+ assert.equal(select.disabled,true,'a failed poll must not unlock the command-line override');
+ assert.match(h.get('tuning-error').textContent,/Status temporarily unavailable/);
+ assert.match(h.get('tuning-explanation').textContent,/disabled by --no-auto-tuning/);
+ assert.equal(h.requests.some(r=>r.route==='set-transfer-tuning'),false);
+});
+
+test('failed tuning changes restore the last saved mode and release the selector',async()=>{
+ const h=await transferFixture({tuning:route=>{
+  if(route==='set-transfer-tuning')throw Error('Could not save preference');
+  return fixtureTuningStatus('fixed');
+ }});
+ await h.context.refreshTransferTuning();
+ const select=h.get('tuning-mode');
+ select.value='auto';
+ await select.onchange();
+ assert.equal(select.value,'fixed','failed save must not claim Automatic was enabled');
+ assert.equal(select.disabled,false,'failed save must permit another selection');
+ assert.match(h.get('tuning-error').textContent,/Could not save preference/);
+ assert.match(h.get('tuning-status').textContent,/Fixed/);
+ assert.deepEqual(h.requests.filter(r=>r.route==='set-transfer-tuning').map(r=>r.data),[{Mode:'auto'}]);
+ await h.context.refreshTransferTuning();
+ assert.equal(h.get('tuning-error').textContent,'','a successful refresh clears the transient failure');
+});
+
+test('automatic tuning explains provider throttling instead of claiming it is learning',async()=>{
+ const h=await transferFixture({tuning:()=>fixtureTuningStatus('auto',{Scheduler:{BulkLimit:4,ThrottledScopes:1,Reason:'Storage throttling; reduced activity while recovering'}})});
+ await h.context.refreshTransferTuning();
+ assert.equal(h.get('tuning-mode').value,'auto');
+ assert.equal(h.get('tuning-mode').disabled,false);
+ assert.match(h.get('tuning-status').textContent,/Automatic.*4 data request limit/);
+ assert.equal(h.get('tuning-explanation').textContent,'Storage asked Harbor to slow down.');
+ assert.doesNotMatch(h.get('tuning-explanation').textContent,/Learning/);
 });
