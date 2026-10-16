@@ -29,6 +29,11 @@ def archive_name(version, target):
     return f"harbor-{version}-{system}-{arch}.{suffix}"
 
 
+def release_ldflags(version, revision, modified):
+    return (f"-X main.version={version} -X main.releaseRevision={revision} "
+            f"-X main.releaseModified={str(modified).lower()}")
+
+
 def package(binary, output, metadata, timestamp):
     """Normalize archive ownership, permissions, member order and timestamps."""
     system, arch = metadata["target"].split("/")
@@ -45,6 +50,7 @@ def package(binary, output, metadata, timestamp):
         "Settings default to .harbor/profiles.db under your user home directory.\n"
         "Credentials use the operating system credential vault.\n"
         "Publisher signing is not established by a checksum.\n"
+        "Read UPGRADE.md before replacing an older build or moving settings.\n"
         "See LICENSE for Harbor and THIRD_PARTY_NOTICES.txt for upstream notices.\n"
     )
     if system == "linux":
@@ -54,7 +60,7 @@ def package(binary, output, metadata, timestamp):
         "README.txt": (instructions.encode(), 0o644),
         "build-info.json": ((json.dumps(metadata, sort_keys=True, indent=2) + "\n").encode(), 0o644),
     }
-    for name in ("LICENSE", "THIRD_PARTY_NOTICES.txt"):
+    for name in ("LICENSE", "THIRD_PARTY_NOTICES.txt", "UPGRADE.md"):
         document = ROOT / name
         if not document.is_file():
             raise RuntimeError(f"Required distribution document is missing: {name}")
@@ -107,7 +113,7 @@ def main():
             binary = Path(temporary) / f"harbor-{system}-{arch}"
             environment = dict(os.environ, GOOS=system, GOARCH=arch, CGO_ENABLED="0")
             subprocess.run(["go", "build", "-trimpath", "-buildvcs=true", "-ldflags",
-                            f"-X main.version={args.version}", "-o", str(binary), "."],
+                            release_ldflags(args.version, revision, dirty), "-o", str(binary), "."],
                            cwd=ROOT, env=environment, check=True)
             metadata = dict(version=args.version, revision=revision, modified=dirty,
                             toolchain=toolchain, target=f"{system}/{arch}", publisher_signed=False)
