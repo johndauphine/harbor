@@ -38,7 +38,57 @@ If credential saving fails, check that Harbor runs in your logged-in desktop ses
 
 ## Development
 
-Requires Go 1.26.9 or newer; use the patched version recorded in `go.mod`. Run `go test ./...` then `go run .`. Harbor opens your default browser automatically. The session URL is also printed as a fallback; keep it private. Use `--no-browser` for unattended startup or to open the URL yourself. Stop with Ctrl+C. Source has no dependency on Node, Wails, WebView2, or a separate server.
+### Windows desktop preview
+
+An initial Wails desktop integration is available on the feature branch. It uses
+the stable Wails v2.15.0 framework, standard Windows title bar and resize controls,
+system title-bar appearance, and the existing light/dark Harbor workspace.
+Windows ARM64 and x64 builds require the Microsoft Edge WebView2 Runtime.
+macOS desktop integration is a later target.
+
+With Go 1.26.9 or newer on PATH, build from PowerShell:
+
+```powershell
+go run github.com/wailsapp/wails/v2/cmd/wails@v2.15.0 build -platform windows/arm64 -tags desktop -s -skipbindings -webview2 error
+.\build\bin\harbor-desktop.exe
+```
+
+Use `windows/amd64` for x64. The frontend is embedded JavaScript and CSS; this
+build skips npm and binding generation. NSIS and UPX are optional and unused.
+The executable is an unsigned development preview, separate from published v1.0.0
+browser releases. Windows file metadata uses version 0.0.0 to identify the preview.
+
+The desktop window serves assets and the existing API through Wails' private
+WebView transport, without a TCP listener or browser session URL. Profiles,
+Windows Credential Manager entries, SQLite transfer recovery and tuning retain
+their existing locations and behavior. Closing the window cancels active work
+and waits up to 30 seconds for shutdown and journal persistence; interrupted
+transfers can be reviewed and retried after restart. The same database lock
+prevents browser and desktop instances from opening one store simultaneously.
+Existing file pickers remain in-app dialogs in this first integration.
+
+`--db` and `--no-auto-tuning` apply to desktop launches. `--no-browser` selects
+the existing loopback server mode; `--port` applies only to that mode. Normal
+`go run .` and release packaging still use the browser interface.
+
+Run `go test -tags desktop,production ./...` for desktop regressions. An opt-in
+Windows smoke test opens and closes a real WebView2 window using a temporary
+database and an in-memory credential vault, verifies profile/transfer API calls,
+opens the connection dialog, and uploads/downloads synthetic bytes against a
+local HTTPS storage fixture:
+
+```powershell
+$env:HARBOR_DESKTOP_TEST = '1'
+go test -tags desktop,production -run '^TestDesktopWindowSmoke$' -v -timeout 60s .
+Remove-Item Env:HARBOR_DESKTOP_TEST
+```
+
+Real-provider transfers through WebView2, native OS file dialogs, signing,
+installers and macOS desktop behavior remain future validation/work.
+
+### Browser development
+
+Requires Go 1.26.9 or newer; use the patched version recorded in `go.mod`. Run `go test ./...` then `go run .`. Harbor opens your default browser automatically. The session URL is also printed as a fallback; keep it private. Use `--no-browser` for unattended startup or to open the URL yourself. Stop with Ctrl+C. Browser builds do not require Node, WebView2, or a separate server; Wails is compiled only for Windows builds with the `desktop` tag.
 
 Build: `go build -o harbor .`. Cross-build Windows with `GOOS=windows GOARCH=arm64 go build -o harbor.exe .` (or `amd64`).
 

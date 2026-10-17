@@ -25,13 +25,20 @@ var assets embed.FS
 
 func main() {
 	noAutoTuning := flag.Bool("no-auto-tuning", false, "Disable automatic transfer tuning for this launch and use fixed settings")
-	noBrowser := flag.Bool("no-browser", false, "Print the session URL without opening the default browser")
+	noBrowser := flag.Bool("no-browser", false, "Run the browser server and print its session URL without opening the default browser")
 	showVersion := flag.Bool("version", false, "Print build information and exit")
-	port := flag.Int("port", 0, "Local port (0 chooses an available port)")
+	port := flag.Int("port", 0, "Local browser-server port (0 chooses an available port)")
 	dbPath := flag.String("db", "", "SQLite path (default: ~/.harbor/profiles.db)")
 	flag.Parse()
 	if *showVersion {
 		fmt.Println(versionText())
+		return
+	}
+	if desktopEnabled && !*noBrowser {
+		if err := runDesktop(*dbPath, *noAutoTuning); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
 		return
 	}
 	store, err := acquireStoreLock(*dbPath)

@@ -1,0 +1,15 @@
+{
+  "$schema": "https://wails.io/schemas/config.v2.json",
+  "name": "Harbor",
+  "outputfilename": "harbor-desktop",
+  "frontend:dir": "frontend",
+  "frontend:install": "",
+  "frontend:build": "",
+  "frontend:dev:watcher": "",
+  "author": {"name": "John Dauphine"},
+  "info": {
+    "productName": "Harbor",
+    "productVersion": "0.0.0",
+    "comments": "Unsigned desktop development build"
+  }
+}
