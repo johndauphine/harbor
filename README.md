@@ -65,7 +65,8 @@ their existing locations and behavior. Closing the window cancels active work
 and waits up to 30 seconds for shutdown and journal persistence; interrupted
 transfers can be reviewed and retried after restart. The same database lock
 prevents browser and desktop instances from opening one store simultaneously.
-Existing file pickers remain in-app dialogs in this first integration.
+Upload selection uses native Windows file and folder dialogs. Download save
+locations retain the in-app picker.
 
 `--db` and `--no-auto-tuning` apply to desktop launches. `--no-browser` selects
 the existing loopback server mode; `--port` applies only to that mode. Normal
@@ -83,8 +84,12 @@ go test -tags desktop,production -run '^TestDesktopWindowSmoke$' -v -timeout 60s
 Remove-Item Env:HARBOR_DESKTOP_TEST
 ```
 
-Real-provider transfers through WebView2, native OS file dialogs, signing,
-installers and macOS desktop behavior remain future validation/work.
+Native upload dialogs, local large-file transfers, and AWS upload/retry paths
+have been exercised on Windows ARM64 using the x64 build under emulation.
+See [the folder upload investigation](docs/windows-folder-upload-fix.md) for
+results and limitations. Full large-file AWS completion over the hotspot remains
+unverified; installer packaging, publisher signing, native x64 hardware, and macOS
+desktop behavior remain future validation/work.
 
 ### Browser development
 
@@ -200,6 +205,8 @@ On 2026-10-15, browser checks against disposable real MinIO storage passed singl
 ## Transfer refresh
 
 The browser automatically refreshes the relevant current listing when an upload or download completes, preserving the selected file if it remains visible. Terminal status changes are reported once, and failed transfers include their error in the status field. Completed downloads show their saved location in the transfer row. Transfers in other buckets do not change the user's current location. Frontend regression check: `node --test tests/ui-transfers.test.cjs` (Node is only required for this developer test).
+
+In the Windows desktop preview, **Add files** and **Add folder** use native file pickers. Go stages the selected files directly, avoiding large file bodies in WebView2. Folder selections retain their top-level folder and nested paths. The native picker rejects directory enumeration or metadata errors, symlinks, more than 1,000 files, and files larger than 5 GiB with a visible error. File contents are read during staging; read failures are reported per file while earlier queued uploads continue. Dragged desktop files larger than 64 MiB must instead be selected through **Add files** or **Add folder**.
 
 ## Save As
 

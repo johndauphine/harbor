@@ -42,3 +42,36 @@ func TestDesktopTransport(t *testing.T) {
 		t.Fatalf("shutdown must reject new work: %d", response.Code)
 	}
 }
+
+func TestDesktopPickerTransport(t *testing.T) {
+	app := NewApp()
+	calls := 0
+	handler := desktopHandler(app, func(folder bool) ([]desktopUploadFile, error) { calls++; return []desktopUploadFile{}, nil })
+	for _, tc := range []struct {
+		method, host, origin, body string
+		want                       int
+	}{
+		{"POST", "wails.localhost", "http://wails.localhost", `{"Folder":true}`, 200},
+		{"GET", "wails.localhost", "", "{}", 405},
+		{"POST", "wails.localhost", "https://example.com", "{}", 403},
+		{"POST", "example.com", "", "{}", 403},
+		{"POST", "wails.localhost", "", "invalid", 400},
+	} {
+		response := httptest.NewRecorder()
+		request := httptest.NewRequest(tc.method, "http://"+tc.host+"/api/desktop-upload-pick", strings.NewReader(tc.body))
+		request.Header.Set("Origin", tc.origin)
+		handler.ServeHTTP(response, request)
+		if response.Code != tc.want {
+			t.Fatalf("%+v: %d", tc, response.Code)
+		}
+	}
+	if calls != 1 {
+		t.Fatalf("picker invoked %d times", calls)
+	}
+	app.beginShutdown()
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest("POST", "http://wails.localhost/api/desktop-upload-pick", strings.NewReader("{}")))
+	if response.Code != 503 || calls != 1 {
+		t.Fatal("picker admitted after shutdown")
+	}
+}

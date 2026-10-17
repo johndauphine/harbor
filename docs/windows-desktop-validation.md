@@ -1,5 +1,10 @@
 # Windows desktop preview validation — 2026-10-16
 
+This records the initial preview checks. Subsequent native picker, large-file,
+AWS transfer, x64 smoke-test, and signing timing results are documented in
+[the 2026-10-17 investigation](windows-folder-upload-fix.md). The limitations
+below describe the initial validation date, not all current implementation work.
+
 This is post-v1.0.0 development on `codex/windows-wails`, with no merge or release.
 
 ## Design and setup

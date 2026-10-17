@@ -67,6 +67,7 @@ async function browse(append=false,options={}){
 };$('refresh').onclick=action(()=>browse());$('go').onclick=action(openTypedPath);$('up').onclick=action(async()=>{prefix=prefix.replace(/[^/]+\/$/,'');await browse()});$('test').onclick=action(async()=>{if(!profile)throw Error('Choose a connection first');message(await api('test',{ProfileID:profile}))});$('more').onclick=action(()=>browse(true));action(profiles)();
 
 let uploading=false,uploadTarget=null,uploadItems=[],uploadStop=false,uploadCollecting=false,uploadGeneration=0;
+const nativeUploadPicker=typeof window!=='undefined'&&!!window.runtime;
 function localChild(directory,name){const sep=directory.includes('\\')?'\\':'/';return directory.replace(/[\\/]$/,'')+sep+name}
 function renderUpload(){
  const busy=uploading||uploadCollecting;
@@ -90,9 +91,10 @@ function addUploadFiles(files){
   const file=entry.file||entry,path=entry.path||file.webkitRelativePath||file.name;
   if(!path||path.startsWith('/')||path.split('/').some(part=>!part||part==='.'||part==='..')||path.includes('\0')){errors.push('Invalid file path: '+path);continue}
   if(file.size>5*1024**3){errors.push(path+' exceeds the 5 GiB file limit.');continue}
+  if(nativeUploadPicker&&!entry.localPath&&file.size>64*1024**2){errors.push(path+': use Add files or Add folder for desktop files larger than 64 MiB.');continue}
   if(uploadItems.some(item=>item.path===path)){errors.push(path+' is already in the list. Remove it before choosing a replacement.');continue}
   if(uploadItems.length>=1000){errors.push('Select up to 1,000 files per upload.');break}
-  uploadItems.push({file,path,status:'Ready'});
+  uploadItems.push({file,path,localPath:entry.localPath,status:'Ready'});
  }
  $('upload-error').textContent=errors.join('\n');renderUpload();
 }
@@ -103,8 +105,20 @@ $('upload').onclick=action(async()=>{
  $('upload-connection').textContent=connectionProfiles.find(p=>p.ID===profile)?.Name||profile;
  $('upload-error').textContent='';$('upload-file-input').value='';$('upload-folder-input').value='';renderUpload();$('upload-dialog').showModal();
 });
-$('upload-add-files').onclick=()=>{if(!uploading&&!uploadCollecting)$('upload-file-input').click()};
-$('upload-add-folder').onclick=()=>{if(!uploading&&!uploadCollecting)$('upload-folder-input').click()};
+async function pickUploadFiles(folder){
+ if(uploading||uploadCollecting)return;
+ if(!nativeUploadPicker){$(folder?'upload-folder-input':'upload-file-input').click();return}
+ const generation=uploadGeneration;uploadCollecting=true;renderUpload();$('upload-error').textContent='Choosing files…';
+ try{
+  const files=await api('desktop-upload-pick',{Folder:folder});
+  if(generation!==uploadGeneration)return;
+  uploadCollecting=false;addUploadFiles(files.map(file=>({file:{name:file.name,size:file.size},path:file.path,localPath:file.localPath})));
+  if(folder&&!files.length)$('upload-error').textContent='No files selected. Empty folders are not uploaded.';
+ }catch(error){if(generation===uploadGeneration)$('upload-error').textContent='Could not add files: '+error.message}
+ finally{if(generation===uploadGeneration){uploadCollecting=false;renderUpload()}}
+}
+$('upload-add-files').onclick=()=>pickUploadFiles(false);
+$('upload-add-folder').onclick=()=>pickUploadFiles(true);
 for(const id of ['upload-file-input','upload-folder-input'])$(id).onchange=()=>{addUploadFiles(Array.from($(id).files||[]));$(id).value=''};
 $('upload-clear').onclick=()=>{if(!uploading&&!uploadCollecting){uploadItems=[];$('upload-error').textContent='';renderUpload()}};
 function closeUpload(){uploadGeneration++;uploadCollecting=false;$('upload-dialog').close();uploadItems=[];uploadTarget=null}
@@ -134,17 +148,22 @@ uploadDrop.ondrop=async e=>{
  finally{if(generation===uploadGeneration){uploadCollecting=false;renderUpload()}}
 };
 $('upload-form').onsubmit=async e=>{
- e.preventDefault();if(uploading||uploadCollecting||!uploadItems.length||!uploadTarget)return;
+ e.preventDefault();if(uploading||uploadCollecting)return;
+ if(!uploadItems.length||!uploadTarget){$('upload-error').textContent='Choose files and a destination before uploading. Close and reopen Upload if the destination is missing.';return}
  uploading=true;uploadStop=false;let queued=0;const errors=[];
  const target={...uploadTarget},items=uploadItems.slice();$('upload-error').textContent='';renderUpload();
  for(const item of items){
   if(uploadStop)break;
   item.status='Preparing…';renderUpload();
   try{
-   const query=new URLSearchParams({profile:target.ProfileID,bucket:target.Bucket,key:target.Prefix+item.path});
-   const response=await fetch('/api/upload?'+query,{method:'POST',headers:{Authorization:'Bearer '+session,'Content-Type':'application/octet-stream'},body:item.file});
-   if(!response.ok)throw Error((await response.text()).trim()||'Upload could not be prepared');
-   await response.json();item.status='Queued';queued++;
+   if(item.localPath)await api('upload-local',{ProfileID:target.ProfileID,Bucket:target.Bucket,Key:target.Prefix+item.path,Path:item.localPath});
+   else{
+    const query=new URLSearchParams({profile:target.ProfileID,bucket:target.Bucket,key:target.Prefix+item.path});
+    const response=await fetch('/api/upload?'+query,{method:'POST',headers:{Authorization:'Bearer '+session,'Content-Type':'application/octet-stream'},body:item.file});
+    if(!response.ok)throw Error((await response.text()).trim()||'Upload could not be prepared');
+    await response.json();
+   }
+   item.status='Queued';queued++;
   }catch(error){item.status='Failed';errors.push(item.path+': '+error.message)}
   renderUpload();
  }
