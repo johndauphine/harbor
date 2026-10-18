@@ -162,12 +162,26 @@ func (a *App) recoverTransfers(db *sql.DB) error {
 			referenced[t.Path] = true
 		}
 		t.CleanupError = ""
-		if t.userCancelled && t.checkpoint != nil {
+		currentIdentity, identityErr := a.connectionIdentity(t.ProfileID)
+		if identityErr == nil && currentIdentity != t.ConnectionIdentity {
+			identityErr = errConnectionChanged
+		}
+		if t.ConnectionIdentity == "" {
+			identityErr = errUnverifiedTransfer
+		}
+		retired := identityErr != nil && t.Status != "completed"
+		// Preserve FileAttempt if removing a download partial fails: its name
+		// remains tied to the checkpoint's original attempt across restarts.
+		if retired || t.userCancelled && t.checkpoint != nil {
 			if err = a.removePartial(t); err != nil {
-				return err
+				t.CleanupError = err.Error()
+			} else {
+				t.checkpoint = nil
 			}
-			t.checkpoint = nil
 			t.Resumable = false
+			if retired {
+				t.Error = identityErr.Error()
+			}
 		}
 		if t.checkpoint == nil {
 			if err = a.removePartial(t); err != nil {
@@ -198,7 +212,11 @@ func (a *App) recoverTransfers(db *sql.DB) error {
 	defer cancel()
 	for _, transferID := range a.transferOrder {
 		t := a.transfers[transferID]
-		if t.multipartID != "" && t.checkpoint == nil {
+		currentIdentity, identityErr := a.connectionIdentity(t.ProfileID)
+		if identityErr == nil && currentIdentity != t.ConnectionIdentity {
+			identityErr = errConnectionChanged
+		}
+		if t.multipartID != "" && (t.checkpoint == nil || t.ConnectionIdentity == "" || identityErr != nil) {
 			if err = a.cleanupMultipart(ctx, *t); err != nil {
 				t.CleanupError = "Remote multipart cleanup pending; Retry when the connection is available."
 				if err = a.persistTransferLocked(t); err != nil {
@@ -208,6 +226,49 @@ func (a *App) recoverTransfers(db *sql.DB) error {
 		}
 	}
 	return nil
+}
+
+// Caller holds profileMu. Fresh credentials may abort an owned multipart ID only
+// against its original endpoint/region/addressing scope. This cleanup path never
+// lists parts, completes an upload, or starts a replacement transfer.
+func (a *App) cleanupRetiredTransferLocked(t Transfer) error {
+	ctx, cancel := context.WithTimeout(a.ctx, 5*time.Second)
+	defer cancel()
+	var cleanupErr error
+	if t.multipartID != "" {
+		p, err := a.connectionLocked(t.ProfileID, "")
+		if err == nil && (t.multipartScope == "" || multipartScope(p.Endpoint, p.Region, p.PathStyle) != t.multipartScope) {
+			err = errors.New("Restore this transfer's original connection settings before cleaning up its multipart upload")
+		}
+		if err == nil {
+			var raw string
+			raw, err = a.secretGet(credentialID(p))
+			if err == nil {
+				var c *s3.Client
+				c, err = configuredS3Client(ctx, p, raw)
+				if err == nil {
+					err = a.cleanupMultipartWithClient(ctx, c, t)
+				}
+			}
+		}
+		cleanupErr = err
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	current := a.transfers[t.ID]
+	if current == nil || current.attempt != t.attempt {
+		return errors.New("Transfer attempt changed")
+	}
+	localErr := a.removePartial(current)
+	if localErr == nil {
+		current.checkpoint = nil
+	}
+	current.Resumable = false
+	current.CleanupError = ""
+	if err := errors.Join(cleanupErr, localErr); err != nil {
+		current.CleanupError = err.Error()
+	}
+	return errors.Join(cleanupErr, localErr, a.persistTransferLocked(current))
 }
 
 func (a *App) removePartial(t *Transfer) error {
@@ -289,11 +350,11 @@ func (a *App) cleanupMultipartWithClient(ctx context.Context, c *s3.Client, t Tr
 	return a.setMultipart(t, "", "")
 }
 
-func (a *App) prepareTransfer(ctx context.Context, t Transfer) error {
+func (a *App) prepareTransfer(ctx context.Context, c *s3.Client, t Transfer) error {
 	cleanupCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	if t.checkpoint == nil {
-		if err := a.cleanupMultipart(cleanupCtx, t); err != nil {
+		if err := a.cleanupMultipartWithClient(cleanupCtx, c, t); err != nil {
 			return err
 		}
 	}

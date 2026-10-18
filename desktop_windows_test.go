@@ -143,7 +143,7 @@ func TestDesktopWindowSmoke(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	fixtureJSON, _ := json.Marshal(map[string]any{"ProfileID": profile.ID, "Path": dir, "Large": large})
+	fixtureJSON, _ := json.Marshal(map[string]any{"ProfileID": profile.ID, "ConnectionIdentity": profile.Identity, "Path": dir, "Large": large})
 	opts := desktopOptions(app)
 	base := opts.AssetServer.Handler
 	native := desktopHandler(app, func(isFolder bool) ([]desktopUploadFile, error) {

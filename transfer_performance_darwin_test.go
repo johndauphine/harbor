@@ -121,7 +121,7 @@ func TestAWSLargeFilePerformance(t *testing.T) {
 				mustPerf(t, err)
 				mustPerf(t, pprof.StartCPUProfile(cpu))
 			}
-			id, stage := perfHTTPUpload(t, server.URL, token, selected.ID, bucket, key, source, size)
+			id, stage := perfHTTPUpload(t, server.URL, token, selected.ID, connectionIdentity(selected), bucket, key, source, size)
 			tr := perfWait(t, a, id, "completed")
 			elapsed := time.Since(started)
 			record := meter.stop("upload", label, trial, size, elapsed, stage)
@@ -164,7 +164,7 @@ func TestAWSLargeFilePerformance(t *testing.T) {
 		key := "interrupt.bin"
 		keys[key] = true
 		for _, fraction := range []float64{.1, .5, .9} {
-			transfer, stage := perfHTTPUpload(t, server.URL, token, selected.ID, bucket, key, source, size)
+			transfer, stage := perfHTTPUpload(t, server.URL, token, selected.ID, connectionIdentity(selected), bucket, key, source, size)
 			stopped := perfCancelAt(t, a, transfer, int64(float64(size)*fraction))
 			started := time.Now()
 			mustPerf(t, a.RetryTransfer(transfer))
@@ -265,12 +265,12 @@ func (m *perfMeter) stop(kind, label string, run int, size int64, elapsed, stage
 	}
 	return perfRecord{kind, label, run, size, elapsed.Seconds(), float64(size) / (1 << 20) / elapsed.Seconds(), stage.Seconds(), float64(m.peak) / (1 << 20), float64(end.TotalAlloc-m.start.TotalAlloc) / (1 << 20), seconds(u) - seconds(m.usage)}
 }
-func perfHTTPUpload(t *testing.T, base, token, profile, bucket, key, path string, size int64) (string, time.Duration) {
+func perfHTTPUpload(t *testing.T, base, token, profile, identity, bucket, key, path string, size int64) (string, time.Duration) {
 	t.Helper()
 	f, e := os.Open(path)
 	mustPerf(t, e)
 	defer f.Close()
-	query := url.Values{"profile": {profile}, "bucket": {bucket}, "key": {key}}
+	query := url.Values{"profile": {profile}, "identity": {identity}, "bucket": {bucket}, "key": {key}}
 	req, e := http.NewRequest("POST", base+"/api/upload?"+query.Encode(), io.LimitReader(f, size))
 	mustPerf(t, e)
 	req.ContentLength = size

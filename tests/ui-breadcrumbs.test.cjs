@@ -10,7 +10,7 @@ async function setup(){
  const elements=new Map(),get=id=>{if(!elements.has(id))elements.set(id,new Element());return elements.get(id)};
  const requests=[];let responder=async req=>({Objects:[{Key:req.Prefix+'child/',Folder:true},{Key:req.Prefix+'file.txt',Size:4,Folder:false}],Next:''});
  const context={document:{getElementById:get,createElement:tag=>new Element(tag)},location:{hash:'#test',pathname:'/'},sessionStorage:{getItem(){},setItem(){}},history:{replaceState(){}},setInterval(){},setTimeout,clearTimeout,URL,URLSearchParams,
- fetch:async(url,options)=>{const req=JSON.parse(options.body);let value;if(url.endsWith('/profiles'))value=[{ID:'one',Name:'One'},{ID:'two',Name:'Two'}];else if(url.endsWith('/buckets'))value=['bucket-a','bucket-b'];else if(url.endsWith('/browse')){requests.push(req);value=await responder(req)}else throw Error(url);return{ok:true,json:async()=>value}}};
+ fetch:async(url,options)=>{const req=JSON.parse(options.body);let value;if(url.endsWith('/profiles'))value=[{ID:'one',Name:'One',Identity:'one-identity'},{ID:'two',Name:'Two',Identity:'two-identity'}];else if(url.endsWith('/buckets'))value=['bucket-a','bucket-b'];else if(url.endsWith('/browse')){requests.push(req);value={ConnectionIdentity:req.ProfileID+'-identity',...await responder(req)}}else throw Error(url);return{ok:true,json:async()=>value}}};
  vm.createContext(context);vm.runInContext(fs.readFileSync(path.join(__dirname,'../frontend/app.js'),'utf8'),context);await new Promise(r=>setImmediate(r));await get('profiles').children[0].children[0].click();await get('buckets').children[0].children[0].click();
  return{get,requests,context,setResponder:fn=>responder=fn,crumbs:()=>get('location').children.filter(e=>e.tag==='button'),go:async value=>{get('path').value=value;await get('go').click()}};
 }
@@ -169,4 +169,38 @@ test('empty suggestion page with continuation retains Load more matches',async()
  h.get('path').value='report-';await h.context.suggestPaths();
  const more=h.get('path-suggestions').children.at(-1);assert.equal(more.textContent,'Load more matches');await more.click();
  assert.equal(h.get('path-suggestions').children[0].textContent,'report-final.txt');
+});
+
+test('Shift+Tab always preserves reverse focus; forward Tab only consumes an advancing completion',async()=>{
+ const h=await setup(),key=(shiftKey=false)=>{const event={key:'Tab',shiftKey,defaultPrevented:false,preventDefault(){this.defaultPrevented=true}};h.get('path').onkeydown(event);return event};
+ for(const scenario of [
+  {input:'r',objects:[{Key:'report.txt'}],next:'',active:false},
+  {input:'r',objects:[{Key:'report-a'},{Key:'report-b'}],next:'',active:false},
+  {input:'r',objects:[{Key:'report.txt'}],next:'next',active:true}
+ ]){
+  h.setResponder(async()=>({Objects:scenario.objects,Next:scenario.next}));h.get('path').value=scenario.input;await h.context.suggestPaths();if(scenario.active)h.get('path').onkeydown({key:'ArrowDown',preventDefault(){}});
+  assert.equal(key(true).defaultPrevented,false);assert.equal(h.get('path').value,scenario.input);
+  assert.equal(key().defaultPrevented,true);
+ }
+ for(const scenario of [
+  {input:'report-',objects:[{Key:'report-a'},{Key:'report-b'}],next:''},
+  {input:'r',objects:[{Key:'report.txt'}],next:'next'}
+ ]){
+  h.setResponder(async()=>({Objects:scenario.objects,Next:scenario.next}));h.get('path').value=scenario.input;await h.context.suggestPaths();assert.equal(key().defaultPrevented,false);assert.equal(h.get('path').value,scenario.input);
+ }
+});
+
+test('suggestion pagination supplies the reviewed connection identity and rejects mixed identities',async()=>{
+ const h=await setup();h.setResponder(async req=>({Objects:[{Key:req.Token?'report-new.txt':'report-old.txt'}],Next:req.Token?'':'next',ConnectionIdentity:req.Token?'changed-identity':'reviewed-identity'}));
+ h.get('path').value='report-';await h.context.suggestPaths();await h.get('path-suggestions').children.at(-1).click();
+ assert.equal(h.requests.at(-1).ConnectionIdentity,'reviewed-identity');assert.equal(h.get('path-suggestions').hidden,true);assert.match(h.get('message').textContent,/Connection changed/);
+});
+
+test('Tab leaves a sole exact match unchanged and permits focus movement unless explicitly selected',async()=>{
+ for(const folder of [false,true]){
+  const h=await setup(),key=folder?'folder/':'report.txt';h.setResponder(async()=>({Objects:[{Key:key,Folder:folder}],Next:''}));h.get('path').value=key;await h.context.suggestPaths();
+  const requests=h.requests.length;let prevented=false;h.get('path').onkeydown({key:'Tab',preventDefault(){prevented=true}});
+  assert.equal(prevented,false,'an exact match does not advance the input');assert.equal(h.get('path').value,key);assert.equal(h.requests.length,requests,'exact folder matches must not retrigger suggestions on Tab');
+  h.get('path').onkeydown({key:'ArrowDown',preventDefault(){}});h.get('path').onkeydown({key:'Tab',preventDefault(){prevented=true}});assert.equal(prevented,true,'explicitly highlighted suggestions remain selectable');
+ }
 });

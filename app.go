@@ -31,6 +31,7 @@ import (
 
 type Profile struct {
 	credentialID string
+	Identity     string
 	ID           string
 	Name         string
 	Endpoint     string
@@ -55,41 +56,44 @@ type Object struct {
 	StorageClass string
 }
 type Page struct {
-	Objects []Object
-	Next    string
+	Objects            []Object
+	Next               string
+	ConnectionIdentity string
 }
 type downloadTarget struct {
-	Path      string
-	Overwrite bool
+	Path               string
+	Overwrite          bool
+	ConnectionIdentity string
 }
 
 type Transfer struct {
-	multipartID    string
-	multipartScope string
-	partialPath    string
-	checkpoint     *transferCheckpoint
-	userCancelled  bool
-	Acknowledged   bool
-	Resumable      bool
-	ResumedBytes   int64
-	CleanupError   string
-	attempt        uint64
-	destination    *downloadTarget
-	ID             string
-	Direction      string
-	Key            string
-	Path           string
-	ProfileID      string
-	Bucket         string
-	Done           int64
-	Total          int64
-	Status         string
-	Error          string
-	CreatedAt      time.Time
-	SavedAt        time.Time
-	SavedPath      string
-	SaveError      string
-	cancel         context.CancelFunc
+	ConnectionIdentity string
+	multipartID        string
+	multipartScope     string
+	partialPath        string
+	checkpoint         *transferCheckpoint
+	userCancelled      bool
+	Acknowledged       bool
+	Resumable          bool
+	ResumedBytes       int64
+	CleanupError       string
+	attempt            uint64
+	destination        *downloadTarget
+	ID                 string
+	Direction          string
+	Key                string
+	Path               string
+	ProfileID          string
+	Bucket             string
+	Done               int64
+	Total              int64
+	Status             string
+	Error              string
+	CreatedAt          time.Time
+	SavedAt            time.Time
+	SavedPath          string
+	SaveError          string
+	cancel             context.CancelFunc
 }
 type App struct {
 	journalEnabled   bool
@@ -97,7 +101,7 @@ type App struct {
 	ctx              context.Context
 	appCancel        context.CancelFunc
 	mu               sync.Mutex
-	profileMu        sync.Mutex
+	profileMu        sync.RWMutex
 	closing          bool
 	workers          sync.WaitGroup
 	operations       map[string]context.CancelFunc
@@ -284,9 +288,13 @@ func (a *App) shutdown(ctx context.Context) error {
 }
 func id() string { b := make([]byte, 16); _, _ = rand.Read(b); return hex.EncodeToString(b) }
 func (a *App) Profiles() []Profile {
-	a.profileMu.Lock()
-	defer a.profileMu.Unlock()
-	return append([]Profile{}, a.profiles...)
+	a.profileMu.RLock()
+	defer a.profileMu.RUnlock()
+	out := append([]Profile{}, a.profiles...)
+	for i := range out {
+		out[i].Identity = connectionIdentity(out[i])
+	}
+	return out
 }
 func validate(p Profile) error {
 	if strings.TrimSpace(p.Name) == "" || strings.TrimSpace(p.Region) == "" {
@@ -377,6 +385,7 @@ func (a *App) commitProfile(tx *sql.Tx) error {
 }
 
 func (a *App) SaveProfile(p Profile, secret Secret) (Profile, error) {
+	p.Identity = "" // Derived on read; caller-provided revisions are not authoritative.
 	if err := validate(p); err != nil {
 		return Profile{}, err
 	}
@@ -475,6 +484,7 @@ func (a *App) SaveProfile(p Profile, secret Secret) (Profile, error) {
 	if !found {
 		a.profiles = append(a.profiles, p)
 	}
+	p.Identity = connectionIdentity(p)
 	if err = a.cleanupCredentials(db); err != nil {
 		return p, &credentialCleanupError{Operation: "saved"}
 	}
@@ -499,27 +509,27 @@ func (t httpsOnlyTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 }
 
 func (a *App) client(ctx context.Context, profileID string) (*s3.Client, error) {
-	a.profileMu.Lock()
-	var p Profile
-	for _, v := range a.profiles {
-		if v.ID == profileID {
-			p = v
-		}
-	}
-	if p.ID == "" {
-		a.profileMu.Unlock()
-		return nil, errors.New("Connection not found")
+	c, _, err := a.clientSnapshot(ctx, profileID, "")
+	return c, err
+}
+
+func (a *App) clientSnapshot(ctx context.Context, profileID, expected string) (*s3.Client, string, error) {
+	a.profileMu.RLock()
+	p, err := a.connectionLocked(profileID, expected)
+	if err != nil {
+		a.profileMu.RUnlock()
+		return nil, "", err
 	}
 	raw, err := a.secretGet(credentialID(p))
-	a.profileMu.Unlock()
+	a.profileMu.RUnlock()
 	if err != nil {
-		return nil, fmt.Errorf("Credential vault: %w", err)
+		return nil, "", fmt.Errorf("Credential vault: %w", err)
 	}
 	c, err := configuredS3Client(ctx, p, raw)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
-	return a.tuneClient(c, p), nil
+	return a.tuneClient(c, p), connectionIdentity(p), nil
 }
 
 func configuredS3Client(ctx context.Context, p Profile, raw string) (*s3.Client, error) {
@@ -592,10 +602,14 @@ func (a *App) TestConnection(profileID string) (string, error) {
 	}
 	return fmt.Sprintf("Connected. %d buckets available.", len(b)), nil
 }
-func (a *App) Browse(profileID, bucket, prefix, token string) (Page, error) {
+func (a *App) Browse(profileID, bucket, prefix, token string, expected ...string) (Page, error) {
 	ctx, cancel := context.WithTimeout(a.ctx, 30*time.Second)
 	defer cancel()
-	c, e := a.client(ctx, profileID)
+	identity := ""
+	if len(expected) > 0 {
+		identity = expected[0]
+	}
+	c, identity, e := a.clientSnapshot(ctx, profileID, identity)
 	if e != nil {
 		return Page{}, e
 	}
@@ -607,7 +621,7 @@ func (a *App) Browse(profileID, bucket, prefix, token string) (Page, error) {
 	if e != nil {
 		return Page{}, e
 	}
-	page := Page{Objects: []Object{}, Next: aws.ToString(v.NextContinuationToken)}
+	page := Page{Objects: []Object{}, Next: aws.ToString(v.NextContinuationToken), ConnectionIdentity: identity}
 	for _, f := range v.CommonPrefixes {
 		page.Objects = append(page.Objects, Object{Key: aws.ToString(f.Prefix), Folder: true})
 	}
@@ -625,38 +639,51 @@ func (a *App) Browse(profileID, bucket, prefix, token string) (Page, error) {
 	return page, nil
 }
 func (a *App) QueueDownload(profile, bucket, key string, target ...downloadTarget) (string, error) {
+	if err := a.transferShutdownError(); err != nil {
+		return "", err
+	}
 	if bucket == "" || key == "" {
 		return "", errors.New("Bucket and key required")
 	}
-	if _, e := a.client(a.ctx, profile); e != nil {
+	expected := ""
+	if len(target) > 0 {
+		expected = target[0].ConnectionIdentity
+	}
+	_, identity, e := a.clientSnapshot(a.ctx, profile, expected)
+	if e != nil {
 		return "", e
 	}
 	dir, e := a.transferCacheDir()
 	if e != nil {
 		return "", e
 	}
-	return a.queueTransfer("download", profile, bucket, key, filepath.Join(dir, "download-"+id()), target...)
+	return a.queueTransferBound("download", profile, bucket, key, filepath.Join(dir, "download-"+id()), identity, target...)
 }
 func (a *App) queue(direction, profile, bucket, key, path string, target ...downloadTarget) string {
 	transferID, _ := a.queueTransfer(direction, profile, bucket, key, path, target...)
 	return transferID
 }
 func (a *App) queueTransfer(direction, profile, bucket, key, path string, target ...downloadTarget) (string, error) {
-	if a.journalEnabled {
-		a.profileMu.Lock()
-		defer a.profileMu.Unlock()
-		found := false
-		for _, p := range a.profiles {
-			if p.ID == profile {
-				found = true
-				break
-			}
-		}
-		if !found {
-			return "", errors.New("Connection no longer exists")
-		}
+	return a.queueTransferBound(direction, profile, bucket, key, path, "", target...)
+}
+
+func (a *App) queueTransferBound(direction, profile, bucket, key, path, expected string, target ...downloadTarget) (string, error) {
+	// Reject shutdown before waiting for settings or credential operations.
+	// Never hold a.mu while acquiring profileMu; admission is rechecked below.
+	if err := a.transferShutdownError(); err != nil {
+		return "", err
 	}
-	t := &Transfer{attempt: 1, ID: id(), Direction: direction, ProfileID: profile, Bucket: bucket, Key: key, Path: path, Status: "queued", CreatedAt: time.Now()}
+	a.profileMu.RLock()
+	defer a.profileMu.RUnlock()
+	p, err := a.connectionLocked(profile, expected)
+	if err != nil && (a.journalEnabled || expected != "") {
+		return "", err
+	}
+	identity := ""
+	if err == nil {
+		identity = connectionIdentity(p)
+	}
+	t := &Transfer{ConnectionIdentity: identity, attempt: 1, ID: id(), Direction: direction, ProfileID: profile, Bucket: bucket, Key: key, Path: path, Status: "queued", CreatedAt: time.Now()}
 	if len(target) > 0 {
 		t.destination = &target[0]
 	}
@@ -682,6 +709,15 @@ func (a *App) queueTransfer(direction, profile, bucket, key, path string, target
 		a.run(t.ID, 1)
 	}()
 	return t.ID, nil
+}
+
+func (a *App) transferShutdownError() error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.closing {
+		return errShuttingDown
+	}
+	return nil
 }
 func (a *App) Transfers() []Transfer {
 	a.mu.Lock()
@@ -744,6 +780,20 @@ func (a *App) RetryTransfer(id string) error {
 		return err
 	}
 	t := a.transfers[id]
+	identityErr := error(nil)
+	if t.ConnectionIdentity == "" && a.journalEnabled {
+		identityErr = errUnverifiedTransfer
+	} else if _, err := a.connectionLocked(t.ProfileID, t.ConnectionIdentity); err != nil {
+		identityErr = err
+	}
+	if identityErr != nil {
+		spec := *t
+		a.mu.Unlock()
+		// A changed revision can only retire old recovery state. It must never
+		// authorize resending payload to a newly configured account or endpoint.
+		cleanupErr := a.cleanupRetiredTransferLocked(spec)
+		return errors.Join(identityErr, cleanupErr)
+	}
 	if t.userCancelled && t.checkpoint != nil {
 		spec := *t
 		a.mu.Unlock()
@@ -857,6 +907,14 @@ func (a *App) run(id string, attempt uint64) {
 		return
 	}
 	t.cancel = nil
+	// Checkpointed engines already atomically committed their terminal state.
+	// A second write must not downgrade that durable success to a retryable error.
+	if t.Status == "completed" {
+		if t.Direction == "upload" {
+			_ = os.Remove(t.Path)
+		}
+		return
+	}
 	if err != nil {
 		t.Status = "failed"
 		t.Error = err.Error()
@@ -926,12 +984,15 @@ func (a *App) execute(ctx context.Context, t Transfer) (resultErr error) {
 		return admissionErr
 	}
 	defer release()
-	if err := a.prepareTransfer(ctx, t); err != nil {
-		return err
-	}
-	c, e := a.client(ctx, t.ProfileID)
+	c, _, e := a.clientSnapshot(ctx, t.ProfileID, t.ConnectionIdentity)
 	if e != nil {
 		return e
+	}
+	if err := a.prepareTransfer(ctx, c, t); err != nil {
+		return err
+	}
+	if a.journalEnabled && t.ConnectionIdentity == "" {
+		return errUnverifiedTransfer
 	}
 	ctx = a.transferTuningContext(ctx, t)
 	if client, ok := c.Options().HTTPClient.(*http.Client); ok {
@@ -1103,7 +1164,7 @@ func (a *App) CreateFolder(profile, bucket, prefix, name string) (string, error)
 }
 
 // DeleteFile deletes exactly one selected object, never a prefix or bucket.
-func (a *App) DeleteFile(profile, bucket, key, etag string) (string, error) {
+func (a *App) DeleteFile(profile, bucket, key, etag string, expected ...string) (string, error) {
 	if bucket == "" || key == "" || strings.HasSuffix(key, "/") {
 		return "", errors.New("Select a file; folder deletion is not supported")
 	}
@@ -1117,7 +1178,11 @@ func (a *App) DeleteFile(profile, bucket, key, etag string) (string, error) {
 	defer releaseMutation()
 	ctx, cancel := context.WithTimeout(a.ctx, 30*time.Second)
 	defer cancel()
-	c, err := a.client(ctx, profile)
+	identity := ""
+	if len(expected) > 0 {
+		identity = expected[0]
+	}
+	c, _, err := a.clientSnapshot(ctx, profile, identity)
 	if err != nil {
 		return "", err
 	}

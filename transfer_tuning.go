@@ -243,9 +243,10 @@ func (m *tuningAdmissionMiddleware) HandleFinalize(ctx context.Context, in middl
 }
 
 type tuningRoundTripper struct {
-	next  http.RoundTripper
-	app   *App
-	scope string
+	next                              http.RoundTripper
+	app                               *App
+	scope                             string
+	controlTimeout, inactivityTimeout time.Duration
 }
 
 func (a *App) admitTuningRequest(r *http.Request, scope string) (*tuningAdmission, error) {
@@ -292,11 +293,28 @@ func (t *tuningRoundTripper) RoundTrip(r *http.Request) (*http.Response, error) 
 	admission.claimed.Store(true)
 	lease, state, class, started := admission.lease, admission.state, admission.class, admission.started
 	networkStarted := time.Now()
+	interval := t.controlTimeout
+	inactivity := !class.Control || middleware.GetOperationName(r.Context()) == "CompleteMultipartUpload"
+	if inactivity {
+		interval = t.inactivityTimeout
+		if interval <= 0 {
+			interval = transferInactivityTimeout
+		}
+	} else if interval <= 0 {
+		interval = controlRequestTimeout
+	}
+	attempt := newNetworkAttempt(r.Context(), interval, inactivity)
+	request := r.Clone(attempt.ctx)
+	if request.Body != nil && request.Body != http.NoBody {
+		request.Body = &networkProgressBody{ReadCloser: request.Body, attempt: attempt}
+	}
 	state.mu.Lock()
 	state.attempts++
 	state.mu.Unlock()
-	response, err := t.next.RoundTrip(r)
+	response, err := t.next.RoundTrip(request)
 	if err != nil {
+		err = attempt.err(err)
+		attempt.stop()
 		lease.Release()
 		state.mu.Lock()
 		state.failures++
@@ -307,6 +325,7 @@ func (t *tuningRoundTripper) RoundTrip(r *http.Request) (*http.Response, error) 
 	// Failure responses include SDK retries that eventually succeed. The SDK
 	// retains its own retry/backoff policy; the scheduler adds no operation retry.
 	if response == nil {
+		attempt.stop()
 		lease.Release()
 		return nil, errors.New("Storage returned no HTTP response")
 	}
@@ -317,20 +336,22 @@ func (t *tuningRoundTripper) RoundTrip(r *http.Request) (*http.Response, error) 
 		state.scheduler.Observe(transferSample{Class: class, Started: networkStarted, Finished: time.Now(), Throttled: response.StatusCode == 429 || response.StatusCode == 503, Cancelled: r.Context().Err() != nil})
 	}
 	if response.Body == nil || response.Body == http.NoBody {
+		err = attempt.err(nil)
+		attempt.stop()
 		lease.Release()
-		return response, nil
+		return response, err
 	}
-	body := &tuningResponseBody{ReadCloser: response.Body, lease: lease, state: state, class: class, ctx: r.Context(), started: networkStarted}
+	body := &tuningResponseBody{ReadCloser: response.Body, lease: lease, state: state, class: class, ctx: r.Context(), started: networkStarted, attempt: attempt}
 	response.Body = body
-	stop := context.AfterFunc(r.Context(), func() { _ = body.Close() })
+	stop := context.AfterFunc(attempt.ctx, func() { _ = body.Close() })
 	body.cancelMu.Lock()
 	body.stop = stop
 	if body.finished {
 		stop()
 	}
 	body.cancelMu.Unlock()
-	if r.Context().Err() != nil {
-		body.finish()
+	if attempt.ctx.Err() != nil {
+		_ = body.Close()
 	}
 	return response, nil
 }
@@ -340,7 +361,6 @@ type tuningResponseBody struct {
 	lease     *transferLease
 	state     *appTransferTuning
 	once      sync.Once
-	bytes     atomic.Uint64
 	cancelMu  sync.Mutex
 	stop      func() bool
 	class     transferRequestClass
@@ -350,6 +370,7 @@ type tuningResponseBody struct {
 	finished  bool
 	closeOnce sync.Once
 	closeErr  error
+	attempt   *networkAttempt
 }
 
 func (b *tuningResponseBody) finish() {
@@ -360,23 +381,24 @@ func (b *tuningResponseBody) finish() {
 			b.stop()
 		}
 		b.cancelMu.Unlock()
+		b.attempt.stop()
 		b.lease.Release()
-		b.state.mu.Lock()
-		b.state.bodyBytes += b.bytes.Load()
-		b.state.mu.Unlock()
 	})
 }
 func (b *tuningResponseBody) Read(p []byte) (int, error) {
 	n, err := b.ReadCloser.Read(p)
-	b.bytes.Add(uint64(n))
+	if n > 0 {
+		// Close may finish concurrently with a pending Read. Account each read
+		// directly so that cancellation cannot retire its byte count too early.
+		b.state.mu.Lock()
+		b.state.bodyBytes += uint64(n)
+		b.state.mu.Unlock()
+	}
+	b.attempt.progress(n)
+	err = b.attempt.err(err)
 	if err != nil {
 		if err != io.EOF {
-			b.failure.Do(func() {
-				b.state.mu.Lock()
-				b.state.failures++
-				b.state.mu.Unlock()
-				b.state.scheduler.Observe(transferSample{Class: b.class, Started: b.started, Finished: time.Now(), TransportError: true, Cancelled: b.ctx != nil && b.ctx.Err() != nil})
-			})
+			b.observeFailure()
 		}
 		b.finish()
 	}
@@ -384,8 +406,19 @@ func (b *tuningResponseBody) Read(p []byte) (int, error) {
 }
 func (b *tuningResponseBody) Close() error {
 	b.closeOnce.Do(func() { b.closeErr = b.ReadCloser.Close() })
+	if b.attempt.err(nil) != nil {
+		b.observeFailure()
+	}
 	b.finish()
 	return b.closeErr
+}
+func (b *tuningResponseBody) observeFailure() {
+	b.failure.Do(func() {
+		b.state.mu.Lock()
+		b.state.failures++
+		b.state.mu.Unlock()
+		b.state.scheduler.Observe(transferSample{Class: b.class, Started: b.started, Finished: time.Now(), TransportError: true, Cancelled: b.ctx.Err() != nil})
+	})
 }
 
 func (a *App) acquireActiveTransfer(ctx context.Context) (func(), error) {

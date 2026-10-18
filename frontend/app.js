@@ -11,14 +11,16 @@ function updateWorkspace(){
  for(const id of ['upload','new-folder','refresh','go','path','object-search','find-objects','clear-search','up'])$(id).disabled=!bucket||(id==='up'&&!prefix);
  $('test').disabled=!profile;$('new-bucket').disabled=!profile;
 }
-async function selectConnection(p){
+async function selectConnection(p,isCurrent=()=>true){
+ if(!isCurrent())return;
  const request=++connectionRequest;browseRequest++;profile=p.ID;bucket='';prefix='';objectFilter='';filterLocation='';$('path').value='';$('object-search').value='';closePathSuggestions();renderBreadcrumbs();clearListing();$('buckets').replaceChildren();message('Loading buckets…');
  for(const row of $('profiles').children){const b=row.children[0];b.classList[b.dataset.profile===p.ID?'add':'remove']('active');b.setAttribute('aria-pressed',String(b.dataset.profile===p.ID))}
- let buckets;try{buckets=await api('buckets',{ProfileID:p.ID})}catch(e){if(request!==connectionRequest||profile!==p.ID)return;throw e}
- if(request!==connectionRequest||profile!==p.ID)return;renderBuckets(buckets,p.ID);message(buckets.length+' buckets available');
+ let buckets;try{buckets=await api('buckets',{ProfileID:p.ID})}catch(e){if(!isCurrent()||request!==connectionRequest||profile!==p.ID)return;throw e}
+ if(!isCurrent()||request!==connectionRequest||profile!==p.ID)return;renderBuckets(buckets,p.ID);message(buckets.length+' buckets available');
 }
-async function profiles(){
- const list=await api('profiles');connectionProfiles=list;updateWorkspace();
+var profilesRequest=0;
+async function profiles(isCurrent=()=>true){
+ const request=++profilesRequest,list=await api('profiles');if(request!==profilesRequest||!isCurrent())return false;connectionProfiles=list;updateWorkspace();
  if(!profile){clearListing();message(list.length?'Choose a connection to browse your storage.':'Add your first connection to start browsing S3 storage.');}
  $('profiles').replaceChildren(...list.map(p=>{
  const row=document.createElement('div');row.className='connection-row';
@@ -47,23 +49,35 @@ async function browse(append=false,options={}){
  $('path').value=target.Prefix;$('path').placeholder='Bucket root';updateWorkspace();renderBreadcrumbs();$('more').disabled=true;
  if(!target.ProfileID||!target.Bucket){clearListing();if(!options.quiet)message('Choose a bucket first');return false}
  if(!options.quiet)message('Loading…');
- let page;try{page=await api('browse',{ProfileID:target.ProfileID,Bucket:target.Bucket,Prefix:target.Prefix+target.Filter,Token:token})}
+ let page;try{page=await api('browse',{ProfileID:target.ProfileID,Bucket:target.Bucket,Prefix:target.Prefix+target.Filter,Token:token,...(append?{ConnectionIdentity:previousContext.ConnectionIdentity}:{})});if(!page.ConnectionIdentity||append&&page.ConnectionIdentity!==previousContext.ConnectionIdentity)throw Error('Connection changed; refresh and review the listing again')}
  catch(e){if(request!==browseRequest||!currentListing(target))return false;if(previousContext===listingContext&&currentListing(previousContext)){listingState='ready';$('more').disabled=false}else clearListing('error');throw e}
  if(request!==browseRequest||!currentListing(target))return false;
- const selectedKey=previousContext===listingContext?[...selectedKeys]:[];
- objects=append?previousObjects.concat(page.Objects):page.Objects;next=page.Next;listingContext=target;listingState='ready';$('more').disabled=false;$('more').hidden=!next;renderObjects(selectedKey);
+ const selectedKey=previousContext===listingContext&&previousContext?.ConnectionIdentity===page.ConnectionIdentity?[...selectedKeys]:[];
+ objects=append?previousObjects.concat(page.Objects):page.Objects;next=page.Next;listingContext=Object.freeze({...target,ConnectionIdentity:page.ConnectionIdentity});listingState='ready';$('more').disabled=false;$('more').hidden=!next;renderObjects(selectedKey);
  if(!options.quiet)message(target.Bucket+'/'+target.Prefix+' · '+objects.length+' entries');return true;
-}$('add').onclick=()=>editConnection();$('close').onclick=()=>$('connection').close();$('form').onsubmit=async e=>{
- e.preventDefault();$('connection-error').textContent='';
+}function closeConnection(){connectionGeneration++;connectionPending=null;$('connection-save').disabled=false;$('connection').close()}
+$('add').onclick=()=>editConnection();$('close').onclick=closeConnection;$('connection').oncancel=()=>{connectionGeneration++;connectionPending=null;$('connection-save').disabled=false};$('form').onsubmit=async e=>{
+ e.preventDefault();if(connectionPending===connectionGeneration)return;
+ const generation=connectionGeneration,isCurrent=()=>generation===connectionGeneration;
+ let navigationConnection=connectionRequest,navigationBrowse=browseRequest;
+ const isNavigationCurrent=()=>isCurrent()&&navigationConnection===connectionRequest&&navigationBrowse===browseRequest;
+ connectionPending=generation;$('connection-save').disabled=true;$('connection-error').textContent='';let committed=false,warning='';
  try{
  const f=new FormData(e.target);
  const result=await api('save',{Profile:{ID:editingConnection,Name:f.get('Name'),Endpoint:f.get('Endpoint'),Region:f.get('Region'),PathStyle:f.has('PathStyle'),CAFile:f.get('CAFile')},Secret:{AccessKey:credentialValue('AccessKey'),SecretKey:credentialValue('SecretKey'),SessionToken:credentialValue('SessionToken')}});
- const saved=result?.Value||result;
- e.target.reset();$('connection').close();await profiles();
+ const saved=result?.Value||result;committed=true;warning=result?.Warning||'';
+ if(!isCurrent()){if(warning)message(warning);return}
+ e.target.reset();$('connection').close();await profiles(isCurrent);if(!isNavigationCurrent())return;
  const updated=connectionProfiles.find(p=>p.ID===saved.ID);
- let navigationError='';if(updated){try{await selectConnection(updated)}catch(e){navigationError='; bucket listing failed: '+e.message}}
+ let navigationError='';if(updated){try{
+  const navigation=selectConnection(updated,isNavigationCurrent);
+  // This save owns the selection it just started. Any later connection or
+  // listing request belongs to newer navigation and supersedes its refresh.
+  navigationConnection=connectionRequest;navigationBrowse=browseRequest;await navigation;
+ }catch(e){navigationError='; bucket listing failed: '+e.message}}if(!isNavigationCurrent())return;
  message((result?.Warning||'Connection saved securely')+navigationError);
- }catch(e){$('connection-error').textContent=e.message}
+ }catch(e){if(isCurrent()){if(committed){if(isNavigationCurrent())message((warning||'Connection saved securely')+'; refresh failed: '+e.message)}else $('connection-error').textContent=e.message}}
+ finally{if(isCurrent()){connectionPending=null;$('connection-save').disabled=false}if(committed&&warning&&!isNavigationCurrent())message(warning)}
 };$('refresh').onclick=action(()=>browse());$('go').onclick=action(openTypedPath);$('up').onclick=action(async()=>{prefix=prefix.replace(/[^/]+\/$/,'');await browse()});$('test').onclick=action(async()=>{if(!profile)throw Error('Choose a connection first');message(await api('test',{ProfileID:profile}))});$('more').onclick=action(()=>browse(true));action(profiles)();
 
 let uploading=false,uploadTarget=null,uploadItems=[],uploadStop=false,uploadCollecting=false,uploadGeneration=0;
@@ -100,7 +114,9 @@ function addUploadFiles(files){
 }
 $('upload').onclick=action(async()=>{
  if(!bucket)throw Error('Choose a bucket first');uploadGeneration++;uploadItems=[];uploadStop=false;uploadCollecting=false;
- uploadTarget={ProfileID:profile,Bucket:bucket,Prefix:prefix};
+ const identity=currentListing()?listingContext.ConnectionIdentity:connectionProfiles.find(p=>p.ID===profile)?.Identity;
+ if(!identity)throw Error('Refresh the connection before uploading');
+ uploadTarget=Object.freeze({ProfileID:profile,Bucket:bucket,Prefix:prefix,ConnectionIdentity:identity});
  $('upload-destination').textContent='s3://'+bucket+'/'+prefix;
  $('upload-connection').textContent=connectionProfiles.find(p=>p.ID===profile)?.Name||profile;
  $('upload-error').textContent='';$('upload-file-input').value='';$('upload-folder-input').value='';renderUpload();$('upload-dialog').showModal();
@@ -156,9 +172,9 @@ $('upload-form').onsubmit=async e=>{
   if(uploadStop)break;
   item.status='Preparing…';renderUpload();
   try{
-   if(item.localPath)await api('upload-local',{ProfileID:target.ProfileID,Bucket:target.Bucket,Key:target.Prefix+item.path,Path:item.localPath});
+   if(item.localPath)await api('upload-local',{ProfileID:target.ProfileID,Bucket:target.Bucket,Key:target.Prefix+item.path,Path:item.localPath,ConnectionIdentity:target.ConnectionIdentity});
    else{
-    const query=new URLSearchParams({profile:target.ProfileID,bucket:target.Bucket,key:target.Prefix+item.path});
+    const query=new URLSearchParams({profile:target.ProfileID,bucket:target.Bucket,key:target.Prefix+item.path,identity:target.ConnectionIdentity});
     const response=await fetch('/api/upload?'+query,{method:'POST',headers:{Authorization:'Bearer '+session,'Content-Type':'application/octet-stream'},body:item.file});
     if(!response.ok)throw Error((await response.text()).trim()||'Upload could not be prepared');
     await response.json();
@@ -175,40 +191,53 @@ $('upload-form').onsubmit=async e=>{
  const finishedGeneration=uploadGeneration;
  if(queued){message(queued+' '+(queued===1?'upload':'uploads')+' queued');try{await transfers()}catch(error){if(uploadGeneration===finishedGeneration)message('Uploads were queued, but transfer status could not be refreshed: '+error.message)}}
 };
-$('download').onclick=action(async()=>{const files=selectedFiles(),target=listingContext;if(!files.length)throw Error('Select files first');await saveDownload(files.map(o=>({ProfileID:target.ProfileID,Bucket:target.Bucket,Key:o.Key}))) });
-let savingDownload=false,saveTransfer=null,saveDirectory=null;
+$('download').onclick=action(async()=>{const files=selectedFiles(),target=listingContext;if(!files.length)throw Error('Select files first');await saveDownload(files.map(o=>({ProfileID:target.ProfileID,Bucket:target.Bucket,Key:o.Key,ConnectionIdentity:target.ConnectionIdentity}))) });
+let savingDownload=false,saveTransfer=null,saveDirectory=null,saveGeneration=0,saveFolderRequest=0,saveFolderPending=false;
+function updateSaveControls(){
+ $('save-confirm').disabled=savingDownload||saveFolderPending;$('save-cancel').disabled=savingDownload;
+ $('save-home').disabled=savingDownload;$('save-up').disabled=savingDownload||!saveDirectory;$('save-go').disabled=savingDownload;$('save-path').disabled=savingDownload;
+ for(const folder of $('save-folders').children)folder.disabled=savingDownload||saveFolderPending;
+}
+function invalidateSaveFolder(){saveFolderRequest++;saveFolderPending=false;saveDirectory=null;$('save-folders').replaceChildren();updateSaveControls()}
+function closeSaveDownload(){saveGeneration++;invalidateSaveFolder();saveTransfer=null;$('save-dialog').close()}
 async function loadSaveFolder(path=''){
- const locations=await api('save-locations',{Path:path});saveDirectory=locations;$('save-path').value=locations.Path;
- $('save-folders').replaceChildren(...locations.Folders.map(name=>button('▸ '+name,async()=>{try{const separator=locations.Path.includes('\\')?'\\':'/';await loadSaveFolder(locations.Path.replace(/[\\/]$/,'')+separator+name)}catch(e){$('save-error').textContent=e.message}})));
+ if(savingDownload||!$('save-dialog').open)return;
+ const generation=saveGeneration,request=++saveFolderRequest,isCurrent=()=>generation===saveGeneration&&request===saveFolderRequest&&$('save-dialog').open;
+ saveFolderPending=true;updateSaveControls();$('save-error').textContent='';
+ try{
+ const locations=await api('save-locations',{Path:path});if(!isCurrent())return;saveDirectory=locations;$('save-path').value=locations.Path;
+ $('save-folders').replaceChildren(...locations.Folders.map(name=>button('▸ '+name,async()=>{if(generation!==saveGeneration||!$('save-dialog').open||saveDirectory!==locations||saveFolderPending||savingDownload)return;const separator=locations.Path.includes('\\')?'\\':'/';await loadSaveFolder(locations.Path.replace(/[\\/]$/,'')+separator+name)})));
  if(!locations.Folders.length)$('save-folders').textContent='No subfolders — you can save here.';
- $('save-error').textContent='';
+ }catch(e){if(isCurrent())$('save-error').textContent=e.message}
+ finally{if(isCurrent()){saveFolderPending=false;updateSaveControls()}}
 }
 async function saveDownload(t){
- if(savingDownload)return;saveTransfer=Array.isArray(t)?t:[t];$('save-name').value=saveTransfer[0].Key.split('/').pop();$('save-name-label').hidden=saveTransfer.length>1;$('save-name').required=saveTransfer.length===1;$('save-summary').textContent=saveTransfer.length>1?'Save '+saveTransfer.length+' files to the chosen folder, keeping their filenames: '+saveTransfer.map(t=>t.Key).join(', '):'';$('save-error').textContent='';$('save-dialog').showModal();
- try{await loadSaveFolder()}catch(e){$('save-error').textContent=e.message}
+ if(savingDownload)return;saveGeneration++;invalidateSaveFolder();saveTransfer=Array.isArray(t)?t:[t];$('save-path').value='';$('save-name').value=saveTransfer[0].Key.split('/').pop();$('save-name-label').hidden=saveTransfer.length>1;$('save-name').required=saveTransfer.length===1;$('save-summary').textContent=saveTransfer.length>1?'Save '+saveTransfer.length+' files to the chosen folder, keeping their filenames: '+saveTransfer.map(t=>t.Key).join(', '):'';$('save-error').textContent='';$('save-dialog').showModal();
+ await loadSaveFolder();
 }
-$('save-home').onclick=()=>loadSaveFolder(saveDirectory?.Home||'').catch(e=>$('save-error').textContent=e.message);
-$('save-up').onclick=()=>loadSaveFolder(saveDirectory?.Parent||'').catch(e=>$('save-error').textContent=e.message);
-$('save-go').onclick=()=>loadSaveFolder($('save-path').value).catch(e=>$('save-error').textContent=e.message);
-$('save-cancel').onclick=()=>{if(!savingDownload)$('save-dialog').close()};
-$('save-dialog').oncancel=e=>{if(savingDownload)e.preventDefault()};
+$('save-home').onclick=()=>loadSaveFolder(saveDirectory?.Home||'');
+$('save-up').onclick=()=>{if(saveDirectory)return loadSaveFolder(saveDirectory.Parent||'')};
+$('save-go').onclick=()=>loadSaveFolder($('save-path').value);
+$('save-path').oninput=()=>{if(!savingDownload){invalidateSaveFolder();$('save-error').textContent=''}};
+$('save-cancel').onclick=()=>{if(!savingDownload)closeSaveDownload()};
+$('save-dialog').oncancel=e=>{if(savingDownload)e.preventDefault();else{saveGeneration++;invalidateSaveFolder();saveTransfer=null}};
 $('save-form').onsubmit=async e=>{
- e.preventDefault();if(savingDownload||!saveTransfer?.length)return;
+ e.preventDefault();if(savingDownload||saveFolderPending||!saveTransfer?.length||!$('save-dialog').open)return;
  const batch=saveTransfer.length>1,directory=$('save-path').value;
  const names=saveTransfer.map(t=>batch?t.Key.split('/').pop():$('save-name').value);
  if(new Set(names).size!==names.length){$('save-error').textContent='Some selected files have the same filename. Download those separately to choose different names.';return}
- savingDownload=true;$('save-confirm').disabled=true;$('save-cancel').disabled=true;
+ savingDownload=true;updateSaveControls();
  const remaining=[],errors=[];let queued=0;
  try{for(let i=0;i<saveTransfer.length;i++){
-  const t=saveTransfer[i],request={ProfileID:t.ProfileID,Bucket:t.Bucket,Key:t.Key,Path:directory,Name:names[i],Overwrite:false};
+  const t=saveTransfer[i],request={ProfileID:t.ProfileID,Bucket:t.Bucket,Key:t.Key,ConnectionIdentity:t.ConnectionIdentity,Path:directory,Name:names[i],Overwrite:false};
   try{let result=await api('download',request);if(result.NeedsOverwrite){if(!confirm('Replace the existing file?\n'+result.Path)){remaining.push(t);continue}await api('download',{...request,Overwrite:true})}queued++}
   catch(e){remaining.push(t);errors.push(t.Key+': '+e.message)}
  }
  saveTransfer=remaining;
- if(!remaining.length)$('save-dialog').close();
+ if(!remaining.length)closeSaveDownload();
  else{$('save-error').textContent=errors.length?errors.join(' · '):'Existing files were skipped. Cancel or choose another destination.';$('save-name-label').hidden=remaining.length>1;$('save-name').required=remaining.length===1;if(remaining.length===1)$('save-name').value=remaining[0].Key.split('/').pop();$('save-summary').textContent=remaining.length+' files remaining: '+remaining.map(t=>t.Key).join(', ')}
  message(queued+' download'+(queued===1?'':'s')+' queued'+(errors.length?' · Failed to queue: '+errors.join(' · '):''));await transfers();
- }finally{savingDownload=false;$('save-confirm').disabled=false;$('save-cancel').disabled=false}
+ }finally{savingDownload=false;updateSaveControls()}
 };
 
 
@@ -397,11 +426,11 @@ async function previewDelete(kind,owner,name,folder=''){
 $('delete-review').onclick=action(async()=>{const state=deleteState;if(!state)return;if(state.kind==='files'){if(state.files.length)prepareDeleteDialog({...state,ready:true})}else await previewDelete(state.kind,state.target.ProfileID,state.target.Bucket,state.target.Prefix)});
 async function deleteSelectedFiles(state){
  const failed=[];let deleted=0,refreshWarning='';
- for(const o of state.files){$('delete-summary').textContent='Deleting objects… '+(deleted+failed.length)+' of '+state.files.length+' processed';try{await api('delete-file',{ProfileID:state.target.ProfileID,Bucket:state.target.Bucket,Key:o.Key,ETag:o.ETag});deleted++}catch(e){failed.push({key:o.Key,error:e.message})}}
- if(currentListing(state.target)){
+ for(const o of state.files){$('delete-summary').textContent='Deleting objects… '+(deleted+failed.length)+' of '+state.files.length+' processed';try{await api('delete-file',{ProfileID:state.target.ProfileID,Bucket:state.target.Bucket,Key:o.Key,ETag:o.ETag,ConnectionIdentity:state.target.ConnectionIdentity});deleted++}catch(e){failed.push({key:o.Key,error:e.message})}}
+ if(currentListing(state.target)&&listingContext?.ConnectionIdentity===state.target.ConnectionIdentity){
   selectedKeys=new Set(failed.map(f=>f.key));updateSelection();
   try{await browse()}catch(e){refreshWarning='Listing refresh failed: '+e.message}
-  if(currentListing(state.target)){selectedKeys=new Set(failed.map(f=>f.key));updateSelection()}
+  if(currentListing(state.target)&&listingContext?.ConnectionIdentity===state.target.ConnectionIdentity){selectedKeys=new Set(failed.map(f=>f.key));updateSelection()}
  }
  const summary='Deleted '+deleted+' file'+(deleted===1?'':'s')+(failed.length?' · Failed: '+failed.map(f=>f.key+': '+f.error).join(' · '):'')+(refreshWarning?' · '+refreshWarning:'');
  renderDeleteRows(state.files.map(o=>({key:o.Key,type:'Object',size:formatBytes(o.Size),status:failed.some(f=>f.key===o.Key)?'Failed':'Deleted'})));state.files=state.files.filter(o=>failed.some(f=>f.key===o.Key));showDeleteResults(state,summary,failed.map(f=>f.key+': '+f.error).join('\n'),failed.length>0);message(summary);
@@ -461,14 +490,15 @@ $('object-search-form').onsubmit=async e=>{e.preventDefault();if(!bucket){messag
 $('clear-search').onclick=action(async()=>{objectFilter='';$('object-search').value='';if(bucket)await browse()});
 
 // Query storage, rather than only the loaded table, for path completion.
-var pathTimer, pathRequest=0, pathMatches=[], pathActive=-1, pathHasMore=false;
-function closePathSuggestions(){clearTimeout(pathTimer);pathRequest++;pathMatches=[];pathActive=-1;pathHasMore=false;$('path-suggestions').hidden=true;$('path').setAttribute('aria-expanded','false');$('path').setAttribute('aria-activedescendant','')}
+var pathTimer, pathRequest=0, pathMatches=[], pathActive=-1, pathHasMore=false,pathConnectionIdentity='';
+function closePathSuggestions(){clearTimeout(pathTimer);pathRequest++;pathMatches=[];pathActive=-1;pathHasMore=false;pathConnectionIdentity='';$('path-suggestions').hidden=true;$('path').setAttribute('aria-expanded','false');$('path').setAttribute('aria-activedescendant','')}
 async function suggestPaths(token='',append=false){
  const input=$('path').value,target={ProfileID:profile,Bucket:bucket,Prefix:input},request=++pathRequest;
  if(!bucket){closePathSuggestions();return}
  try{
-  const page=await api('browse',{...target,Token:token});
+  const page=await api('browse',{...target,Token:token,...(append?{ConnectionIdentity:pathConnectionIdentity}:{})});
   if(request!==pathRequest||input!==$('path').value||target.ProfileID!==profile||target.Bucket!==bucket)return;
+  if(!page.ConnectionIdentity||append&&page.ConnectionIdentity!==pathConnectionIdentity)throw Error('Connection changed; refresh and review the listing again');pathConnectionIdentity=page.ConnectionIdentity;
   pathMatches=(append?pathMatches:[]).concat(page.Objects.filter(o=>o.Key.startsWith(input)));pathActive=-1;pathHasMore=!!page.Next;
   const rows=pathMatches.map((o,i)=>{const row=button(o.Key,()=>{if(request!==pathRequest||input!==$('path').value||target.ProfileID!==profile||target.Bucket!==bucket)return;return choosePath(o,true)});row.id='path-option-'+i;row.setAttribute('role','option');row.setAttribute('aria-selected','false');row.onmousedown=e=>e.preventDefault();return row});
   $('path-suggestions').replaceChildren(...rows);
@@ -494,14 +524,13 @@ $('path').onkeydown=e=>{
   for(let i=0;i<$('path-suggestions').children.length;i++){$('path-suggestions').children[i].setAttribute('aria-selected',String(i===pathActive))}
   $('path').setAttribute('aria-activedescendant','path-option-'+pathActive);return;
  }
- if(e.key==='Tab'&&pathMatches.length){
-  e.preventDefault();
-  if(pathActive>=0){choosePath(pathMatches[pathActive]);return}
+ if(e.key==='Tab'&&!e.shiftKey&&pathMatches.length){
+  if(pathActive>=0){e.preventDefault();choosePath(pathMatches[pathActive]);return}
   if(pathHasMore){message('More matching names are available. Type more or load more matches before completing.');return}
-  if(pathMatches.length===1){choosePath(pathMatches[0]);return}
+  if(pathMatches.length===1){if(pathMatches[0].Key!==$('path').value){e.preventDefault();choosePath(pathMatches[0])}return}
   let shared=pathMatches[0].Key;
   for(const match of pathMatches.slice(1)){while(!match.Key.startsWith(shared))shared=shared.slice(0,-1)}
-  if(shared.length>$('path').value.length){$('path').value=shared;suggestPaths()}
+  if(shared.length>$('path').value.length){e.preventDefault();$('path').value=shared;suggestPaths()}
   return;
  }
  if(e.key==='Enter'){e.preventDefault();if(pathActive>=0)action(()=>choosePath(pathMatches[pathActive],true))();else $('go').click()}
@@ -521,7 +550,7 @@ async function openTypedPath(){
  prefix=typed;await browse();
 }
 
-var connectionProfiles=[],editingConnection='',credentialDirty={};
+var connectionProfiles=[],editingConnection='',credentialDirty={},connectionGeneration=0,connectionPending=null;
 function credentialValue(name){return editingConnection&&!credentialDirty[name]?'':$('connection-'+name).value}
 function credentialFields(){
  for(const name of ['AccessKey','SecretKey','SessionToken']){
@@ -530,6 +559,7 @@ function credentialFields(){
  $('credential-help').textContent=editingConnection?'Saved keys are masked. Select a field and type to replace it; untouched or blank key fields keep the saved key. Include a session token if the replacement credentials require one.':'Credentials are stored in your operating system’s secure vault.';
 }
 function editConnection(p=null){
+ connectionGeneration++;connectionPending=null;$('connection-save').disabled=false;
  editingConnection=p?.ID||'';$('connection-title').textContent=p?'Edit connection':'New connection';$('connection-error').textContent='';
  for(const name of ['Name','Endpoint','Region','CAFile'])$('connection-'+name).value=p?.[name]||(name==='Region'?'us-east-1':'');
  $('connection-PathStyle').checked=!!p?.PathStyle;

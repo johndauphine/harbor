@@ -11,10 +11,10 @@ class Element{
 }
 function deferred(){let resolve,reject;const promise=new Promise((yes,no)=>{resolve=yes;reject=no});return{promise,resolve,reject}}
 const file=(key,size=1)=>({Key:key,Size:size,Folder:false,ETag:'same-content-etag'});
-const page=(objects,next='')=>({Objects:objects.map(o=>({...o})),Next:next});
+const page=(objects,next='',identity='listing-identity')=>({Objects:objects.map(o=>({...o})),Next:next,ConnectionIdentity:identity});
 async function setup(){
  const elements=new Map(),get=id=>{if(!elements.has(id))elements.set(id,new Element());return elements.get(id)},requests=[];
- const responders={profiles:()=>[{ID:'one',Name:'One'},{ID:'two',Name:'Two'}],buckets:()=>['bucket-a','bucket-b'],browse:req=>page([file(req.Prefix+'shared.txt'),{Key:req.Prefix+'folder/',Folder:true}],'initial-token'),'save-locations':()=>({Path:'/Downloads',Home:'/home',Parent:'/',Folders:[]}),download:req=>({ID:'download',Path:req.Path+'/'+req.Name}),'delete-file':req=>req.Key,transfers:()=>[]};
+ const responders={profiles:()=>[{ID:'one',Name:'One',Identity:'one-identity'},{ID:'two',Name:'Two',Identity:'two-identity'}],buckets:()=>['bucket-a','bucket-b'],browse:req=>page([file(req.Prefix+'shared.txt'),{Key:req.Prefix+'folder/',Folder:true}],'initial-token'),'save-locations':()=>({Path:'/Downloads',Home:'/home',Parent:'/',Folders:[]}),download:req=>({ID:'download',Path:req.Path+'/'+req.Name}),'delete-file':req=>req.Key,transfers:()=>[]};
  const context={document:{getElementById:get,createElement:tag=>new Element(tag)},location:{hash:'#test',pathname:'/'},sessionStorage:{getItem(){},setItem(){}},history:{replaceState(){}},setInterval(){},setTimeout,clearTimeout,URL,URLSearchParams,confirm:()=>true,prompt:()=>null,
  fetch:async(url,options)=>{const route=url.slice('/api/'.length),data=JSON.parse(options.body);requests.push({route,data});assert.ok(responders[route],'Unexpected endpoint '+route);const value=await responders[route](data);return{ok:true,json:async()=>value}}};
  vm.createContext(context);vm.runInContext(source,context);await new Promise(r=>setImmediate(r));
@@ -25,6 +25,43 @@ function assertUnavailable(h){assert.equal(h.get('objects').children.length,0);a
 async function tryOldActions(h,row){await row.click();h.get('select-all').click();await h.get('download').click();await h.get('delete').click();assert.equal(h.calls('save-locations').length,0);assert.equal(h.calls('download').length,0);assert.equal(h.calls('delete-file').length,0);assertUnavailable(h)}
 async function queueSelectedDownload(h){await h.get('download').click();assert.equal(h.get('save-dialog').open,true);await h.get('save-form').onsubmit({preventDefault(){}})}
 
+test('download and delete drafts retain the identity of their actual listing after a profile and listing change',async()=>{
+ const h=await setup();await h.row('shared.txt').click();await h.get('download').click();await h.get('delete').click();
+ h.setResponder('profiles',()=>[{ID:'one',Name:'One changed',Identity:'new-profile-identity'}]);await h.context.profiles();h.setResponder('browse',()=>page([file('shared.txt')],'','new-listing-identity'));await h.get('refresh').click();assert.deepEqual(h.selected(),[],'selection is cleared when the listed connection identity changes');
+ await h.get('save-form').onsubmit({preventDefault(){}});h.get('delete-confirmation').value='delete';await h.get('delete-form').onsubmit({preventDefault(){}});
+ assert.equal(h.calls('download')[0].ConnectionIdentity,'listing-identity');assert.equal(h.calls('delete-file')[0].ConnectionIdentity,'listing-identity');
+});
+
+test('object pagination binds the previous connection identity and cannot append results from a replacement connection',async()=>{
+ const h=await setup(),oldRow=h.row('shared.txt');await oldRow.click();h.setResponder('browse',()=>page([file('new.txt')],'','replacement-identity'));await h.get('more').click();
+ assert.equal(h.calls('browse').at(-1).ConnectionIdentity,'listing-identity');assert.equal(h.row('shared.txt'),oldRow);assert.equal(h.row('new.txt'),undefined);assert.deepEqual(h.selected(),['shared.txt']);assert.match(h.get('message').textContent,/Connection changed/);
+ h.setResponder('browse',()=>page([file('next.txt')]));await h.get('more').click();assert.ok(h.row('next.txt'));await queueSelectedDownload(h);assert.equal(h.calls('download')[0].ConnectionIdentity,'listing-identity');
+});
+
+test('a listing missing an actual connection identity cannot enable mutation actions',async()=>{
+ const h=await setup();h.setResponder('browse',()=>page([file('unbound.txt')],'',''));await h.go('new/');assertUnavailable(h);assert.match(h.get('message').textContent,/Connection changed/);
+});
+
+test('failed deletion never restores old keys onto a replacement connection listing',async()=>{
+ for(const changeBeforeRefresh of [false,true]){
+  const h=await setup(),deletion=deferred();await h.row('shared.txt').click();await h.get('delete').click();h.get('delete-confirmation').value='delete';h.setResponder('delete-file',()=>deletion.promise);
+  const pending=h.get('delete-form').onsubmit({preventDefault(){}});h.setResponder('browse',()=>page([file('shared.txt'),file('keep.txt')],'','replacement-identity'));
+  if(changeBeforeRefresh){await h.get('refresh').click();await h.row('keep.txt').click()}
+  const browseCalls=h.calls('browse').length;deletion.reject(Error('Connection changed after review'));await pending;
+  assert.equal(h.calls('delete-file')[0].ConnectionIdentity,'listing-identity');assert.equal(h.calls('browse').length,browseCalls+(changeBeforeRefresh?0:1),'old deletions must not refresh a replacement identity listing');
+  assert.deepEqual(h.selected(),changeBeforeRefresh?['keep.txt']:[],'failed keys from the reviewed connection must not select the same names on another connection');
+  await h.get('delete-cancel').click();await h.get('download').click();
+  assert.equal(h.calls('save-locations').length,changeBeforeRefresh?1:0,'replacement objects require their own explicit selection');
+ }
+});
+
+test('pending deletion can finish while a same-location typed path probe has cleared the listing',async()=>{
+ const h=await setup(),deletion=deferred(),probe=deferred();await h.row('shared.txt').click();await h.get('delete').click();h.get('delete-confirmation').value='delete';h.setResponder('delete-file',()=>deletion.promise);
+ const pending=h.get('delete-form').onsubmit({preventDefault(){}});h.setResponder('browse',()=>probe.promise);const navigation=h.go('probe.txt');assertUnavailable(h);const browseCalls=h.calls('browse').length;
+ deletion.reject(Error('Deletion denied'));await pending;assertUnavailable(h);assert.equal(h.calls('browse').length,browseCalls);assert.match(h.get('delete-summary').textContent,/Failed: shared.txt: Deletion denied/);assert.doesNotMatch(h.get('delete-error').textContent,/Cannot read|Some items may already/);
+ probe.resolve(page([file('probe.txt')]));await navigation;assert.deepEqual(h.selected(),['probe.txt']);
+});
+
 test('slow and failed bucket navigation makes old rows and actions unavailable; recovery uses the destination bucket',async()=>{
  const h=await setup(),oldRow=h.row('shared.txt'),waiting=deferred();await oldRow.click();
  h.setResponder('browse',req=>req.Bucket==='bucket-b'?waiting.promise:page([file('shared.txt')],'a-token'));
@@ -34,7 +71,7 @@ test('slow and failed bucket navigation makes old rows and actions unavailable; 
  await tryOldActions(h,oldRow);
  h.setResponder('browse',req=>page([file('shared.txt',req.Bucket==='bucket-b'?2:1)]));await h.get('refresh').click();await h.row('shared.txt').click();
  await queueSelectedDownload(h);assert.equal(h.calls('download').length,1);assert.equal(h.calls('download')[0].Bucket,'bucket-b');assert.equal(h.calls('download')[0].ProfileID,'one');assert.equal(h.calls('download')[0].Key,'shared.txt');
- await h.get('delete').click();h.get('delete-confirmation').value='delete';await h.get('delete-form').onsubmit({preventDefault(){}});assert.equal(h.calls('delete-file').length,1);assert.deepEqual(h.calls('delete-file')[0],{ProfileID:'one',Bucket:'bucket-b',Key:'shared.txt',ETag:'same-content-etag'});
+ await h.get('delete').click();h.get('delete-confirmation').value='delete';await h.get('delete-form').onsubmit({preventDefault(){}});assert.equal(h.calls('delete-file').length,1);assert.deepEqual(h.calls('delete-file')[0],{ProfileID:'one',Bucket:'bucket-b',Key:'shared.txt',ETag:'same-content-etag',ConnectionIdentity:'listing-identity'});
 });
 
 test('slow and failed folder navigation cannot select or act on the previous folder; refresh recovers',async()=>{

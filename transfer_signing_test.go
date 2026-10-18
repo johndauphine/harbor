@@ -53,12 +53,23 @@ func TestSigningWaitsForCapacityOnEveryAttempt(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	done := make(chan error, 1)
+	var previousAdmission *tuningAdmission
 	go func() {
 		_, err := c.PutObject(ctx, &s3.PutObjectInput{Bucket: aws.String("bucket"), Key: aws.String("queued"), Body: strings.NewReader("payload")}, func(o *s3.Options) {
 			o.APIOptions = append(o.APIOptions, func(stack *middleware.Stack) error {
 				return stack.Finalize.Insert(middleware.FinalizeMiddlewareFunc("CheckFreshAdmission", func(ctx context.Context, in middleware.FinalizeInput, next middleware.FinalizeHandler) (middleware.FinalizeOutput, middleware.Metadata, error) {
 					signs.Add(1)
-					if a.TransferTuningStatus().Scheduler.ActiveBulk != 1 {
+					admission, _ := ctx.Value(tuningAdmissionKey{}).(*tuningAdmission)
+					if admission == nil || admission.lease == nil || admission.state != a.tuning() || admission.lease.scheduler != a.tuning().scheduler || admission.class.Scope != tuningScope(p) || admission.class.Direction != "upload" || admission.class.Control || admission.claimed.Load() {
+						return middleware.FinalizeOutput{}, middleware.Metadata{}, errors.New("signing without a matching unclaimed admission lease")
+					}
+					if previousAdmission != nil && (admission == previousAdmission || admission.lease == previousAdmission.lease) {
+						return middleware.FinalizeOutput{}, middleware.Metadata{}, errors.New("retry reused a prior attempt's admission lease")
+					}
+					previousAdmission = admission
+					// Seven unrelated fixture leases remain held throughout both
+					// attempts. Only this attempt can occupy the eighth slot.
+					if a.TransferTuningStatus().Scheduler.ActiveBulk != 8 {
 						return middleware.FinalizeOutput{}, middleware.Metadata{}, errors.New("signing without an exclusive per-attempt lease")
 					}
 					return next.HandleFinalize(ctx, in)
@@ -73,7 +84,9 @@ func TestSigningWaitsForCapacityOnEveryAttempt(t *testing.T) {
 	}
 	before := signs.Load()
 	waiting := a.TransferTuningStatus().Scheduler.WaitingBulk
-	release()
+	// Release only one fixture lease. Releasing all eight in a loop races the
+	// signing observer, since the first release can immediately admit it.
+	leases[0].Release()
 	if err := <-done; err != nil {
 		t.Fatal(err)
 	}
@@ -83,8 +96,12 @@ func TestSigningWaitsForCapacityOnEveryAttempt(t *testing.T) {
 	if signs.Load() != 2 || requests.Load() != 2 {
 		t.Fatalf("retry bypassed admission/signing: signs=%d requests=%d", signs.Load(), requests.Load())
 	}
-	if a.TransferTuningStatus().Scheduler.ActiveBulk != 0 {
+	if a.TransferTuningStatus().Scheduler.ActiveBulk != 7 {
 		t.Fatal("attempt leaked capacity")
+	}
+	release()
+	if a.TransferTuningStatus().Scheduler.ActiveBulk != 0 {
+		t.Fatal("fixture leaked capacity")
 	}
 }
 

@@ -51,8 +51,15 @@ func TestShutdownWaitsForWorkerBeforeRemovingCache(t *testing.T) {
 	if _, err := os.Stat(path); err != nil {
 		t.Fatal("cache removed while worker active", err)
 	}
-	if a.queue("upload", "fixture", "bucket", "new", "unused") != "" {
-		t.Fatal("admitted work during shutdown")
+	rejected := make(chan error, 1)
+	go func() { _, err := a.queueTransfer("upload", "fixture", "bucket", "new", "unused"); rejected <- err }()
+	select {
+	case err := <-rejected:
+		if !errors.Is(err, errShuttingDown) {
+			t.Fatal("admitted work during shutdown", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("shutdown rejection waited for blocked credential read")
 	}
 	if err := a.RetryTransfer(transferID); err == nil {
 		t.Fatal("admitted retry during shutdown")
@@ -66,6 +73,114 @@ func TestShutdownWaitsForWorkerBeforeRemovingCache(t *testing.T) {
 	}
 	if got := a.Transfers()[0].Status; got != "cancelled" {
 		t.Fatalf("status=%s", got)
+	}
+}
+
+func TestShutdownQueueRejectsWithoutWaitingForProfileWriter(t *testing.T) {
+	a := NewApp()
+	a.ctx = context.Background()
+	a.profiles = []Profile{{ID: "fixture", Name: "Fixture", Region: "us-east-1"}}
+	a.profileMu.Lock()
+	var once sync.Once
+	unblock := func() { once.Do(func() { a.profileMu.Unlock() }) }
+	t.Cleanup(func() { unblock(); _ = a.shutdown(context.Background()) })
+	a.beginShutdown()
+	for _, queue := range []struct {
+		name string
+		call func() (string, error)
+	}{
+		{"upload", func() (string, error) { return a.queueTransfer("upload", "fixture", "bucket", "key", "unused") }},
+		{"download", func() (string, error) { return a.QueueDownload("fixture", "bucket", "key") }},
+	} {
+		t.Run(queue.name, func(t *testing.T) {
+			result := make(chan error, 1)
+			go func() { _, err := queue.call(); result <- err }()
+			select {
+			case err := <-result:
+				if !errors.Is(err, errShuttingDown) {
+					t.Fatal("expected immediate shutdown rejection", err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("shutdown rejection waited for profile writer")
+			}
+		})
+	}
+}
+
+func TestShutdownRejectsQueueThatWasWaitingForProfileWriter(t *testing.T) {
+	a := NewApp()
+	a.ctx = context.Background()
+	a.profiles = []Profile{{ID: "fixture", Name: "Fixture", Region: "us-east-1"}}
+	a.profileMu.Lock()
+	var once sync.Once
+	unblock := func() { once.Do(func() { a.profileMu.Unlock() }) }
+	t.Cleanup(func() { unblock(); _ = a.shutdown(context.Background()) })
+	started, result := make(chan struct{}), make(chan error, 1)
+	go func() {
+		close(started)
+		_, err := a.queueTransfer("upload", "fixture", "bucket", "key", "unused")
+		result <- err
+	}()
+	<-started
+	// Hold the settings writer while the running application's enqueue reaches
+	// profile admission. Shutdown must be rechecked after that writer releases.
+	select {
+	case err := <-result:
+		t.Fatal("enqueue did not wait for profile writer", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	a.beginShutdown()
+	unblock()
+	select {
+	case err := <-result:
+		if !errors.Is(err, errShuttingDown) {
+			t.Fatal("admitted work after shutdown began", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("queue did not return after profile writer released")
+	}
+	if len(a.Transfers()) != 0 {
+		t.Fatal("shutdown race created a transfer")
+	}
+}
+
+func TestShutdownAdmissionAllowsQueueDuringUnrelatedCredentialRead(t *testing.T) {
+	a := NewApp()
+	a.ctx = context.Background()
+	a.profiles = []Profile{{ID: "blocked", Name: "Blocked", Region: "us-east-1"}, {ID: "other", Name: "Other", Region: "us-east-1"}}
+	entered, release, snapshotDone := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	unblock := func() { once.Do(func() { close(release) }) }
+	a.secretGet = func(key string) (string, error) {
+		if key == "blocked" {
+			close(entered)
+			<-release
+		}
+		return "", errors.New("fixture unavailable")
+	}
+	t.Cleanup(func() { unblock(); <-snapshotDone; _ = a.shutdown(context.Background()) })
+	go func() { _, _, _ = a.clientSnapshot(context.Background(), "blocked", ""); close(snapshotDone) }()
+	awaitRetrySignal(t, entered)
+	type queued struct {
+		id  string
+		err error
+	}
+	result := make(chan queued, 1)
+	go func() {
+		transferID, err := a.queueTransfer("upload", "other", "bucket", "key", "unused")
+		result <- queued{transferID, err}
+	}()
+	select {
+	case got := <-result:
+		if got.err != nil || got.id == "" {
+			t.Fatal("unrelated queue was rejected", got.err)
+		}
+		transfers := a.Transfers()
+		if len(transfers) != 1 || transfers[0].ConnectionIdentity != connectionIdentity(a.profiles[1]) {
+			t.Fatal("enqueue lost its accepted identity")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("unrelated queue waited for credential read")
 	}
 }
 
@@ -201,7 +316,7 @@ func TestShutdownUnblocksStagedBrowserUploadAndRemovesPartialFile(t *testing.T) 
 	a.secretGet = func(string) (string, error) { return `{"AccessKey":"fixture","SecretKey":"fixture"}`, nil }
 	reader, writer := io.Pipe()
 	defer writer.Close()
-	req := httptest.NewRequest("POST", "http://127.0.0.1:1234/api/upload?profile=fixture&bucket=bucket&key=fixture", reader)
+	req := httptest.NewRequest("POST", "http://127.0.0.1:1234/api/upload?profile=fixture&bucket=bucket&key=fixture&identity="+connectionIdentity(a.profiles[0]), reader)
 	req.Header.Set("Authorization", "Bearer fixture")
 	recorder := httptest.NewRecorder()
 	handlerDone := make(chan struct{})

@@ -157,8 +157,14 @@ func webHandler(a *App, host, token string) http.Handler {
 				http.Error(w, "Bucket and key required", 400)
 				return
 			}
-			if _, err := a.client(r.Context(), profile); err != nil {
-				http.Error(w, "Connection unavailable", 400)
+			expected := r.URL.Query().Get("identity")
+			if expected == "" {
+				http.Error(w, "Connection identity required; refresh and review the destination", 400)
+				return
+			}
+			_, identity, err := a.clientSnapshot(r.Context(), profile, expected)
+			if err != nil {
+				http.Error(w, err.Error(), 400)
 				return
 			}
 			release, prepErr := a.acquireTransferPreparation(r.Context())
@@ -194,7 +200,7 @@ func webHandler(a *App, host, token string) http.Handler {
 				return
 			}
 			a.recordTransferPhase("staging", stageStarted)
-			id, queueErr := a.queueTransfer("upload", profile, bucket, key, path)
+			id, queueErr := a.queueTransferBound("upload", profile, bucket, key, path, identity)
 			if queueErr != nil {
 				os.Remove(path)
 				http.Error(w, queueErr.Error(), http.StatusServiceUnavailable)
@@ -207,22 +213,23 @@ func webHandler(a *App, host, token string) http.Handler {
 
 		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 		var in struct {
-			Profile      Profile
-			Secret       Secret
-			ProfileID    string
-			Bucket       string
-			Prefix       string
-			Token        string
-			ID           string
-			Key          string
-			ETag         string
-			Path         string
-			Name         string
-			Confirmation string
-			Mode         string
-			Kind         string
-			PlanID       string
-			Overwrite    bool
+			Profile            Profile
+			Secret             Secret
+			ProfileID          string
+			ConnectionIdentity string
+			Bucket             string
+			Prefix             string
+			Token              string
+			ID                 string
+			Key                string
+			ETag               string
+			Path               string
+			Name               string
+			Confirmation       string
+			Mode               string
+			Kind               string
+			PlanID             string
+			Overwrite          bool
 		}
 		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 			http.Error(w, "Invalid request", 400)
@@ -230,6 +237,13 @@ func webHandler(a *App, host, token string) http.Handler {
 		}
 		var value interface{}
 		var err error
+		switch r.URL.Path {
+		case "/api/delete-file", "/api/upload-local", "/api/download":
+			if in.ConnectionIdentity == "" {
+				http.Error(w, "Connection identity required; refresh and review the destination", 400)
+				return
+			}
+		}
 		switch r.URL.Path {
 		case "/api/profiles":
 			value = a.Profiles()
@@ -254,23 +268,23 @@ func webHandler(a *App, host, token string) http.Handler {
 		case "/api/buckets":
 			value, err = a.Buckets(in.ProfileID)
 		case "/api/delete-file":
-			value, err = a.DeleteFile(in.ProfileID, in.Bucket, in.Key, in.ETag)
+			value, err = a.DeleteFile(in.ProfileID, in.Bucket, in.Key, in.ETag, in.ConnectionIdentity)
 		case "/api/create-bucket":
 			value, err = a.CreateBucket(in.ProfileID, in.Bucket)
 		case "/api/create-folder":
 			value, err = a.CreateFolder(in.ProfileID, in.Bucket, in.Prefix, in.Key)
 		case "/api/browse":
-			value, err = a.Browse(in.ProfileID, in.Bucket, in.Prefix, in.Token)
+			value, err = a.Browse(in.ProfileID, in.Bucket, in.Prefix, in.Token, in.ConnectionIdentity)
 		case "/api/upload-locations":
 			value, err = uploadLocations(in.Path)
 		case "/api/upload-local":
-			value, err = a.QueueLocalUpload(r.Context(), in.ProfileID, in.Bucket, in.Key, in.Path)
+			value, err = a.QueueLocalUpload(r.Context(), in.ProfileID, in.Bucket, in.Key, in.Path, in.ConnectionIdentity)
 		case "/api/save-locations":
 			value, err = saveLocations(in.Path)
 		case "/api/save-download":
 			value, err = a.SaveDownload(r.Context(), in.ID, in.Path, in.Name, in.Overwrite)
 		case "/api/download":
-			value, err = a.QueueDownloadTo(in.ProfileID, in.Bucket, in.Key, in.Path, in.Name, in.Overwrite)
+			value, err = a.QueueDownloadTo(in.ProfileID, in.Bucket, in.Key, in.Path, in.Name, in.Overwrite, in.ConnectionIdentity)
 		case "/api/transfer-tuning":
 			value = a.TransferTuningStatus()
 		case "/api/set-transfer-tuning":
