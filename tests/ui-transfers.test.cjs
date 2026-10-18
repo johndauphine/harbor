@@ -25,7 +25,7 @@ test('terminal transfers refresh once, preserve selection, and report failures a
  const context={document:{getElementById:get,createElement:tag=>new Element(tag)},location:{hash:'#fixture',pathname:'/'},sessionStorage:{getItem(){},setItem(){}},history:{replaceState(){}},setInterval(){},setTimeout,clearTimeout,URL,URLSearchParams,confirm:()=>true,
  fetch:async(url,options)=>{
   let result;
-  if(url.endsWith('/profiles'))result=[{ID:'profile',Name:'Fixture'}];
+  if(url.endsWith('/profiles'))result=[{ID:'profile',Name:'Fixture',Identity:'profile-identity'}];
   else if(url.endsWith('/buckets'))result=['bucket'];
   else if(url.endsWith('/upload-locations'))result={Path:'/Downloads',Home:'/home',Parent:'/',Folders:[],Files:[{Name:'fixture.txt',Size:3}]};
   else if(url.startsWith('/api/upload?')){const query=new URL(url,'http://localhost').searchParams;uploadRequests.push({Bucket:query.get('bucket'),Key:query.get('key'),file:options.body});result='upload-id';}
@@ -33,7 +33,7 @@ test('terminal transfers refresh once, preserve selection, and report failures a
   else if(url.endsWith('/download')){downloadRequests.push(JSON.parse(options.body));result={ID:'new',Path:'/Downloads/fixture.txt'};}
   else if(url.endsWith('/transfers'))result=transfers.map(t=>({...t}));
   else if(url.endsWith('/retry')){retryRequests.push(JSON.parse(options.body));result='queued';}
-  else if(url.endsWith('/browse')){browseCalls++;result={Objects:[{Key:'fixture.txt',Size:3,Folder:false,ETag:'etag'}],Next:''};}
+  else if(url.endsWith('/browse')){browseCalls++;result={Objects:[{Key:'fixture.txt',Size:3,Folder:false,ETag:'etag'}],Next:'',ConnectionIdentity:'profile-identity'};}
   else throw Error('Unexpected endpoint '+url);
   return {ok:true,json:async()=>result};
  }};
@@ -92,9 +92,9 @@ async function transferFixture(fixtureOptions={}){
  let list=[];const requests=[];
  const context={document:{getElementById:get,createElement:tag=>new Element(tag)},location:{hash:'#fixture',pathname:'/'},sessionStorage:{getItem(){},setItem(){}},history:{replaceState(){}},setInterval(){},setTimeout,clearTimeout,URL,URLSearchParams,confirm:()=>true,
  fetch:async(url,options)=>{const route=url.slice('/api/'.length),data=JSON.parse(options.body);requests.push({route,data});let result;
- if(route==='profiles')result=[{ID:'one',Name:'Production west'},{ID:'two',Name:'Archive east'}];
+ if(route==='profiles')result=[{ID:'one',Name:'Production west',Identity:'one-identity'},{ID:'two',Name:'Archive east',Identity:'two-identity'}];
  else if(route==='buckets')result=['assets'];
- else if(route==='browse')result={Objects:[],Next:''};
+ else if(route==='browse')result={Objects:[],Next:'',ConnectionIdentity:'listing-identity'};
  else if(route==='transfers')result=list.map(t=>({...t}));
  else if(route==='cancel'||route==='retry')result='queued';
  else if(route==='transfer-tuning'||route==='set-transfer-tuning')result=fixtureOptions.tuning?await fixtureOptions.tuning(route,data):fixtureTuningStatus(route==='set-transfer-tuning'?data.Mode:'observe');

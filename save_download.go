@@ -152,7 +152,7 @@ func copyDownload(ctx context.Context, source io.Reader, destination string, ove
 }
 
 // QueueDownloadTo confirms the destination before starting any transfer.
-func (a *App) QueueDownloadTo(profile, bucket, key, directory, name string, overwrite bool) (SaveResult, error) {
+func (a *App) QueueDownloadTo(profile, bucket, key, directory, name string, overwrite bool, expected ...string) (SaveResult, error) {
 	if name == "" || name == "." || name == ".." || strings.ContainsAny(name, "/\\\x00") || !filepath.IsAbs(directory) {
 		return SaveResult{}, errors.New("Choose a folder and enter a filename without slashes")
 	}
@@ -174,7 +174,11 @@ func (a *App) QueueDownloadTo(profile, bucket, key, directory, name string, over
 	} else if !os.IsNotExist(err) {
 		return SaveResult{}, err
 	}
-	id, err := a.QueueDownload(profile, bucket, key, downloadTarget{Path: destination, Overwrite: overwrite})
+	identity := ""
+	if len(expected) > 0 {
+		identity = expected[0]
+	}
+	id, err := a.QueueDownload(profile, bucket, key, downloadTarget{Path: destination, Overwrite: overwrite, ConnectionIdentity: identity})
 	return SaveResult{ID: id, Path: destination}, err
 }
 
@@ -202,7 +206,7 @@ func uploadLocations(directory string) (SaveLocations, error) {
 	}
 	return result, nil
 }
-func (a *App) QueueLocalUpload(ctx context.Context, profile, bucket, key, path string) (string, error) {
+func (a *App) QueueLocalUpload(ctx context.Context, profile, bucket, key, path string, expected ...string) (string, error) {
 	ctx, done, err := a.beginOperation(ctx)
 	if err != nil {
 		return "", err
@@ -214,7 +218,12 @@ func (a *App) QueueLocalUpload(ctx context.Context, profile, bucket, key, path s
 	if !filepath.IsAbs(path) {
 		return "", errors.New("Choose a local file")
 	}
-	if _, err := a.client(ctx, profile); err != nil {
+	identity := ""
+	if len(expected) > 0 {
+		identity = expected[0]
+	}
+	_, identity, err = a.clientSnapshot(ctx, profile, identity)
+	if err != nil {
 		return "", err
 	}
 	st, err := os.Lstat(path)
@@ -261,7 +270,7 @@ func (a *App) QueueLocalUpload(ctx context.Context, profile, bucket, key, path s
 		return "", errors.New("Could not stage upload; check file access and the 5 GiB limit")
 	}
 	a.recordTransferPhase("staging", stageStarted)
-	transferID, err := a.queueTransfer("upload", profile, bucket, key, stagedPath)
+	transferID, err := a.queueTransferBound("upload", profile, bucket, key, stagedPath, identity)
 	if err != nil {
 		os.Remove(stagedPath)
 		return "", err

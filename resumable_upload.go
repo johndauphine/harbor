@@ -49,7 +49,7 @@ func (a *App) uploadMultipart(ctx context.Context, c *s3.Client, t Transfer, fil
 		if cancelled {
 			cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 			defer cancel()
-			if err := a.cleanupMultipart(cleanup, t); err != nil {
+			if err := a.cleanupMultipartWithClient(cleanup, c, t); err != nil {
 				a.mu.Lock()
 				if current := a.transfers[t.ID]; current != nil && current.attempt == t.attempt {
 					current.Resumable = false
@@ -87,7 +87,7 @@ func (a *App) uploadMultipart(ctx context.Context, c *s3.Client, t Transfer, fil
 	a.recordTransferPhase("source verification", verifyStarted)
 	sourceHash := hex.EncodeToString(h.Sum(nil))
 	if cp != nil && (cp.Size != size || cp.SourceHash != sourceHash) {
-		if err = a.cleanupMultipart(ctx, t); err != nil {
+		if err = a.cleanupMultipartWithClient(ctx, c, t); err != nil {
 			return err
 		}
 		if err = a.storeCheckpoint(t, nil, ""); err != nil {
@@ -161,7 +161,7 @@ func (a *App) uploadMultipart(ctx context.Context, c *s3.Client, t Transfer, fil
 		if err = a.storeCheckpoint(t, cp, ""); err != nil {
 			cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 			defer cancel()
-			return errors.Join(err, a.cleanupMultipart(cleanup, t))
+			return errors.Join(err, a.cleanupMultipartWithClient(cleanup, c, t))
 		}
 	}
 	t.Total = size

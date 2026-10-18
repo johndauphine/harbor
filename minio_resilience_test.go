@@ -615,6 +615,34 @@ func (w *minioWorker) api(t *testing.T, route string, input, output any) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	switch route {
+	case "upload-local", "download", "delete-file":
+		var fields map[string]json.RawMessage
+		if err = json.Unmarshal(raw, &fields); err != nil {
+			t.Fatal(err)
+		}
+		if len(fields["ConnectionIdentity"]) == 0 {
+			var profileID string
+			if err = json.Unmarshal(fields["ProfileID"], &profileID); err != nil {
+				t.Fatal(err)
+			}
+			var profiles []Profile
+			w.api(t, "profiles", map[string]string{}, &profiles)
+			for _, p := range profiles {
+				if p.ID == profileID {
+					fields["ConnectionIdentity"], err = json.Marshal(p.Identity)
+					break
+				}
+			}
+			if err != nil || len(fields["ConnectionIdentity"]) == 0 {
+				t.Fatal("reviewed connection identity unavailable", err)
+			}
+			raw, err = json.Marshal(fields)
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
 	req, err := http.NewRequest("POST", w.url+"/api/"+route, bytes.NewReader(raw))
 	if err != nil {
 		t.Fatal(err)

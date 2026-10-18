@@ -83,16 +83,16 @@ function fixtureAPI() {
  fixture.fetch = async (url, options) => {
   if (url.startsWith('/api/upload?')) {
    const query = new URL(url, 'http://localhost').searchParams;
-   const request = {ProfileID:query.get('profile'),Bucket:query.get('bucket'),Key:query.get('key'),file:options.body};
+   const request = {ProfileID:query.get('profile'),Bucket:query.get('bucket'),Key:query.get('key'),ConnectionIdentity:query.get('identity'),file:options.body};
    if(fixture.onUpload) await fixture.onUpload(request);
    fixture.uploads.push(request); return {ok:true,json:async()=> 'fixture-upload'};
   }
   const route = url.slice(url.lastIndexOf('/') + 1), request = JSON.parse(options.body);
   if (held?.route === route && held.path === request.Path) await held.promise;
   let value;
-  if (route === 'profiles') value = [{ID: 'fixture-profile', Name: 'Fixture'}];
+  if (route === 'profiles') value = [{ID: 'fixture-profile', Name: 'Fixture', Identity: 'fixture-profile-identity'}];
   else if (route === 'buckets') value = ['fixture-bucket'];
-  else if (route === 'browse') value = {Objects: [{Key: 'report.txt', Size: 4, ETag: 'fixture-etag', Folder: false}], Next: ''};
+  else if (route === 'browse') value = {Objects: [{Key: 'report.txt', Size: 4, ETag: 'fixture-etag', Folder: false}], Next: '', ConnectionIdentity: 'fixture-listing-identity'};
   else if (route === 'save-locations') {
    const folder = request.Path || '/fixture/save';
    value = {Path: folder, Home: '/fixture/save', Parent: '/fixture/save', Folders: folder === '/fixture/save' ? ['subfolder'] : []};
@@ -132,6 +132,7 @@ async function exerciseSave(document, fixture, check) {
  get('save-folders').children[0].click(); await settle();
  check(fixture.saveSubmits === 0, 'Choosing a Save subfolder must not submit while its listing is pending');
  check(fixture.downloads.length === 0, 'Choosing a Save subfolder must not queue into the previous folder');
+ check(get('save-confirm').disabled, 'Save here is disabled while folder navigation is pending');
  release(); await settle();
  check(get('save-path').value === '/fixture/save/subfolder', 'Save navigation reaches the chosen folder');
  check(get('save-dialog').open, 'Save remains open after navigation');
@@ -142,6 +143,7 @@ async function exerciseSave(document, fixture, check) {
  check(fixture.downloads.length === 1, 'Save here queues exactly one download');
  check(fixture.downloads[0].Path === '/fixture/save/subfolder', 'Save here uses the chosen folder');
  check(fixture.downloads[0].Name === 'report.txt', 'Save here retains the filename');
+ check(fixture.downloads[0].ConnectionIdentity === 'fixture-listing-identity', 'Save uses the actual reviewed listing identity');
  check(!get('save-dialog').open, 'Successful Save closes the dialog');
 }
 
@@ -203,7 +205,7 @@ test('desktop folder picker stages by local path, preserves nested keys and retr
  await get('upload-form').onsubmit({preventDefault(){}});
  assert.match(get('upload-error').textContent,/File is no longer available/);assert.equal(get('upload-confirm').disabled,false);
  fixture.onUpload=null;await get('upload-form').onsubmit({preventDefault(){}});
- assert.equal(fixture.uploads.length,1);assert.equal(fixture.uploads[0].Key,'Downloads/nested/large.bin');assert.equal(fixture.uploads[0].Path,'C:\\Downloads\\nested\\large.bin');assert.equal(fixture.uploads[0].file,undefined);
+ assert.equal(fixture.uploads.length,1);assert.equal(fixture.uploads[0].Key,'Downloads/nested/large.bin');assert.equal(fixture.uploads[0].Path,'C:\\Downloads\\nested\\large.bin');assert.equal(fixture.uploads[0].file,undefined);assert.equal(fixture.uploads[0].ConnectionIdentity,'fixture-listing-identity');
  assert.equal(get('upload-dialog').open,false);
 });
 
@@ -328,6 +330,13 @@ test('upload keeps the reviewed destination and encodes special characters exact
  vm.runInContext("bucket='elsewhere';prefix='changed/';",context);
  await get('upload-form').onsubmit({preventDefault(){}});
  assert.equal(fixture.uploads[0].Bucket,'fixture-bucket');assert.equal(fixture.uploads[0].Key,'reviewed/a & + # ü.txt');
+ assert.equal(fixture.uploads[0].ConnectionIdentity,'fixture-profile-identity','without a current listing, upload captures the selected profile identity');
+});
+
+test('upload retains the actual listing identity through profile edits and navigation',async()=>{
+ const {document,fixture,context}=await modelFixture(),get=id=>document.getElementById(id);get('upload').click();await settle();pickUpload(document,'upload-file-input',[{name:'reviewed.txt',size:1}]);
+ vm.runInContext("connectionProfiles[0].Identity='replacement-identity';bucket='elsewhere';prefix='changed/';",context);await get('upload-form').onsubmit({preventDefault(){}});
+ assert.equal(fixture.uploads[0].ConnectionIdentity,'fixture-listing-identity');assert.equal(fixture.uploads[0].Bucket,'fixture-bucket');assert.equal(fixture.uploads[0].Key,'reviewed.txt');
 });
 
 

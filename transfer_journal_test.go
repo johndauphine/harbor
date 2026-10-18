@@ -70,7 +70,7 @@ func journalEntry(t *testing.T, a *App, p Profile, direction, key string) *Trans
 	if direction == "upload" {
 		prefix = "upload-"
 	}
-	tr := &Transfer{ID: id(), attempt: 1, Direction: direction, ProfileID: p.ID, Bucket: "bucket", Key: key, Path: filepath.Join(cache, prefix+id()), Status: "running", CreatedAt: time.Now()}
+	tr := &Transfer{ConnectionIdentity: connectionIdentity(p), ID: id(), attempt: 1, Direction: direction, ProfileID: p.ID, Bucket: "bucket", Key: key, Path: filepath.Join(cache, prefix+id()), Status: "running", CreatedAt: time.Now()}
 	a.transfers[tr.ID] = tr
 	a.transferOrder = append(a.transferOrder, tr.ID)
 	return tr

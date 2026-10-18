@@ -156,14 +156,21 @@ func (a *App) discardDownloadCheckpoint(t Transfer) error {
 	}
 	return nil
 }
-func digestRange(file *os.File, start, size int64) (string, error) {
+
+func digestRange(ctx context.Context, file *os.File, start, size int64) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	h := sha256.New()
-	n, e := io.Copy(h, io.NewSectionReader(file, start, size))
+	n, e := io.Copy(h, &contextReader{ctx: ctx, reader: io.NewSectionReader(file, start, size)})
 	if e != nil {
 		return "", e
 	}
 	if n != size {
 		return "", io.ErrUnexpectedEOF
+	}
+	if err := ctx.Err(); err != nil {
+		return "", err
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
@@ -201,7 +208,22 @@ func (a *App) parallelDownload(ctx context.Context, c *s3.Client, t Transfer, in
 		partialInfo, partialErr := os.Lstat(t.partialPath)
 		publishedInfo, publishedErr := os.Lstat(published)
 		linked := partialErr == nil && publishedErr == nil && os.SameFile(partialInfo, publishedInfo)
-		if (os.IsNotExist(partialErr) || linked) && verifyPublishedDownload(published, cp) {
+		verified := false
+		if os.IsNotExist(partialErr) || linked {
+			release, err := a.acquireTransferPreparation(ctx)
+			if err != nil {
+				return true, err
+			}
+			verified, err = verifyPublishedDownload(ctx, published, cp)
+			release()
+			if err != nil {
+				return true, err
+			}
+		}
+		if verified {
+			if err := ctx.Err(); err != nil {
+				return true, err
+			}
 			if linked {
 				if e := os.Remove(t.partialPath); e != nil {
 					return true, e
@@ -262,14 +284,10 @@ func (a *App) parallelDownload(ctx context.Context, c *s3.Client, t Transfer, in
 				file.Close()
 				return true, errors.New("Download checkpoint file changed")
 			}
-			for index, want := range cp.Blocks {
-				start := int64(index) * cp.ChunkSize
-				verifyStarted := time.Now()
-				got, e := digestRange(file, start, min(cp.ChunkSize, size-start))
-				a.recordTransferPhase("download verification", verifyStarted)
-				if e != nil || got != want {
-					delete(cp.Blocks, index)
-				}
+			e = a.verifyRetainedDownload(ctx, file, cp)
+			if e != nil {
+				file.Close()
+				return true, e
 			}
 		} else {
 			if e != nil && !os.IsNotExist(e) {
@@ -446,28 +464,54 @@ func (a *App) parallelDownload(ctx context.Context, c *s3.Client, t Transfer, in
 	}
 	return true, a.finishCheckpointedTransfer(t, size)
 }
-func verifyPublishedDownload(path string, c *transferCheckpoint) bool {
+func (a *App) verifyRetainedDownload(ctx context.Context, file *os.File, cp *transferCheckpoint) error {
+	release, err := a.acquireTransferPreparation(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
+	for index, want := range cp.Blocks {
+		start := int64(index) * cp.ChunkSize
+		verifyStarted := time.Now()
+		got, e := digestRange(ctx, file, start, min(cp.ChunkSize, cp.Size-start))
+		a.recordTransferPhase("download verification", verifyStarted)
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if e != nil || got != want {
+			delete(cp.Blocks, index)
+		}
+	}
+	return ctx.Err()
+}
+func verifyPublishedDownload(ctx context.Context, path string, c *transferCheckpoint) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
 	info, e := os.Lstat(path)
 	if e != nil || !info.Mode().IsRegular() || info.Size() != c.Size {
-		return false
+		return false, nil
 	}
 	file, e := os.Open(path)
 	if e != nil {
-		return false
+		return false, nil
 	}
 	defer file.Close()
 	opened, e := file.Stat()
 	if e != nil || !os.SameFile(info, opened) {
-		return false
+		return false, nil
 	}
 	for index, want := range c.Blocks {
 		start := int64(index) * c.ChunkSize
-		got, e := digestRange(file, start, min(c.ChunkSize, c.Size-start))
+		got, e := digestRange(ctx, file, start, min(c.ChunkSize, c.Size-start))
+		if ctx.Err() != nil {
+			return false, ctx.Err()
+		}
 		if e != nil || got != want {
-			return false
+			return false, nil
 		}
 	}
-	return true
+	return true, ctx.Err()
 }
 
 // Commit completion and retire recovery state together. If the journal write

@@ -19,7 +19,7 @@ import (
 // A real TLS endpoint exercises SDK range handling and the durable app journal.
 // Every block differs, so swapped ranges cannot pass the final comparison.
 func TestParallelDownloadRecovery(t *testing.T) {
-	for _, scenario := range []string{"retry", "restart", "corrupt", "changed", "cancel", "published", "linked"} {
+	for _, scenario := range []string{"retry", "restart", "timeout", "timeout-restart", "corrupt", "changed", "cancel", "published", "linked"} {
 		t.Run(scenario, func(t *testing.T) {
 			t.Setenv("AWS_MAX_ATTEMPTS", "1")
 			payload := make([]byte, 96<<20)
@@ -62,7 +62,15 @@ func TestParallelDownloadRecovery(t *testing.T) {
 				requests[start]++
 				mu.Unlock()
 				if start > 0 && fail.Load() {
+					timeoutScenario := scenario == "timeout" || scenario == "timeout-restart"
+					if timeoutScenario {
+						w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, len(payload)))
+						w.Header().Set("Content-Length", fmt.Sprint(end-start+1))
+						w.WriteHeader(206)
+						w.(http.Flusher).Flush()
+					}
 					deadline := time.Now().Add(5 * time.Second)
+					nextProgress := time.Now()
 					for time.Now().Before(deadline) {
 						app.mu.Lock()
 						cp := app.transfers[tr.ID].checkpoint
@@ -71,7 +79,16 @@ func TestParallelDownloadRecovery(t *testing.T) {
 						if ready {
 							break
 						}
+						if timeoutScenario && time.Now().After(nextProgress) {
+							_, _ = w.Write(payload[start : start+1])
+							w.(http.Flusher).Flush()
+							nextProgress = time.Now().Add(100 * time.Millisecond)
+						}
 						time.Sleep(time.Millisecond)
+					}
+					if timeoutScenario {
+						<-r.Context().Done()
+						return
 					}
 					w.WriteHeader(503)
 					return
@@ -93,7 +110,18 @@ func TestParallelDownloadRecovery(t *testing.T) {
 				t.Fatal(err)
 			}
 			checkpoint(t, app, tr)
-			err := app.execute(context.Background(), *tr)
+			var err error
+			if scenario == "timeout" || scenario == "timeout-restart" {
+				// Admit all ranges so the stalled ranges cannot delay the first
+				// block that this fault injection waits to become durable.
+				_ = app.tuning().scheduler.SetMode("fixed")
+				client := mustDownloadClient(t, app, p.ID)
+				client.Options().HTTPClient.(*http.Client).Transport.(*tuningRoundTripper).inactivityTimeout = 2 * time.Second
+				_, err = app.parallelDownload(context.Background(), client, *tr, nil)
+				assertNetworkTimeout(t, err)
+			} else {
+				err = app.execute(context.Background(), *tr)
+			}
 			if err == nil {
 				t.Fatal("expected injected failure")
 			}
@@ -145,7 +173,7 @@ func TestParallelDownloadRecovery(t *testing.T) {
 				cp := cloneCheckpoint(tr.checkpoint)
 				for i := 0; i < checkpointChunks(cp); i++ {
 					start := int64(i) * cp.ChunkSize
-					cp.Blocks[i], err = digestRange(file, start, min(cp.ChunkSize, cp.Size-start))
+					cp.Blocks[i], err = digestRange(context.Background(), file, start, min(cp.ChunkSize, cp.Size-start))
 					if err != nil {
 						t.Fatal(err)
 					}
@@ -167,7 +195,7 @@ func TestParallelDownloadRecovery(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			if scenario == "restart" || scenario == "published" || scenario == "linked" {
+			if scenario == "restart" || scenario == "timeout-restart" || scenario == "published" || scenario == "linked" {
 				// No in-memory transfer objects are reused by the recovered application.
 				app = journalFixture(t, db, vault)
 				tr = app.transfers[tr.ID]
