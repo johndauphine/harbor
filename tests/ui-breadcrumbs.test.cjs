@@ -195,3 +195,12 @@ test('suggestion pagination supplies the reviewed connection identity and reject
  h.get('path').value='report-';await h.context.suggestPaths();await h.get('path-suggestions').children.at(-1).click();
  assert.equal(h.requests.at(-1).ConnectionIdentity,'reviewed-identity');assert.equal(h.get('path-suggestions').hidden,true);assert.match(h.get('message').textContent,/Connection changed/);
 });
+
+test('Tab leaves a sole exact match unchanged and permits focus movement unless explicitly selected',async()=>{
+ for(const folder of [false,true]){
+  const h=await setup(),key=folder?'folder/':'report.txt';h.setResponder(async()=>({Objects:[{Key:key,Folder:folder}],Next:''}));h.get('path').value=key;await h.context.suggestPaths();
+  const requests=h.requests.length;let prevented=false;h.get('path').onkeydown({key:'Tab',preventDefault(){prevented=true}});
+  assert.equal(prevented,false,'an exact match does not advance the input');assert.equal(h.get('path').value,key);assert.equal(h.requests.length,requests,'exact folder matches must not retrigger suggestions on Tab');
+  h.get('path').onkeydown({key:'ArrowDown',preventDefault(){}});h.get('path').onkeydown({key:'Tab',preventDefault(){prevented=true}});assert.equal(prevented,true,'explicitly highlighted suggestions remain selectable');
+ }
+});

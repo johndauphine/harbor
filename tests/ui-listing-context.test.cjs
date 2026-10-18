@@ -42,6 +42,26 @@ test('a listing missing an actual connection identity cannot enable mutation act
  const h=await setup();h.setResponder('browse',()=>page([file('unbound.txt')],'',''));await h.go('new/');assertUnavailable(h);assert.match(h.get('message').textContent,/Connection changed/);
 });
 
+test('failed deletion never restores old keys onto a replacement connection listing',async()=>{
+ for(const changeBeforeRefresh of [false,true]){
+  const h=await setup(),deletion=deferred();await h.row('shared.txt').click();await h.get('delete').click();h.get('delete-confirmation').value='delete';h.setResponder('delete-file',()=>deletion.promise);
+  const pending=h.get('delete-form').onsubmit({preventDefault(){}});h.setResponder('browse',()=>page([file('shared.txt'),file('keep.txt')],'','replacement-identity'));
+  if(changeBeforeRefresh){await h.get('refresh').click();await h.row('keep.txt').click()}
+  const browseCalls=h.calls('browse').length;deletion.reject(Error('Connection changed after review'));await pending;
+  assert.equal(h.calls('delete-file')[0].ConnectionIdentity,'listing-identity');assert.equal(h.calls('browse').length,browseCalls+(changeBeforeRefresh?0:1),'old deletions must not refresh a replacement identity listing');
+  assert.deepEqual(h.selected(),changeBeforeRefresh?['keep.txt']:[],'failed keys from the reviewed connection must not select the same names on another connection');
+  await h.get('delete-cancel').click();await h.get('download').click();
+  assert.equal(h.calls('save-locations').length,changeBeforeRefresh?1:0,'replacement objects require their own explicit selection');
+ }
+});
+
+test('pending deletion can finish while a same-location typed path probe has cleared the listing',async()=>{
+ const h=await setup(),deletion=deferred(),probe=deferred();await h.row('shared.txt').click();await h.get('delete').click();h.get('delete-confirmation').value='delete';h.setResponder('delete-file',()=>deletion.promise);
+ const pending=h.get('delete-form').onsubmit({preventDefault(){}});h.setResponder('browse',()=>probe.promise);const navigation=h.go('probe.txt');assertUnavailable(h);const browseCalls=h.calls('browse').length;
+ deletion.reject(Error('Deletion denied'));await pending;assertUnavailable(h);assert.equal(h.calls('browse').length,browseCalls);assert.match(h.get('delete-summary').textContent,/Failed: shared.txt: Deletion denied/);assert.doesNotMatch(h.get('delete-error').textContent,/Cannot read|Some items may already/);
+ probe.resolve(page([file('probe.txt')]));await navigation;assert.deepEqual(h.selected(),['probe.txt']);
+});
+
 test('slow and failed bucket navigation makes old rows and actions unavailable; recovery uses the destination bucket',async()=>{
  const h=await setup(),oldRow=h.row('shared.txt'),waiting=deferred();await oldRow.click();
  h.setResponder('browse',req=>req.Bucket==='bucket-b'?waiting.promise:page([file('shared.txt')],'a-token'));

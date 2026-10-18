@@ -55,6 +55,21 @@ test('explicit folder text supersedes pending navigation and detached folder but
  await h.save();assert.equal(h.calls('download')[0].Path,'/typed');
 });
 
+test('failed save-folder navigation leaves the displayed folder listing usable for retry',async()=>{
+ for(const retryName of ['child','sibling']){
+ const h=await setup();h.set('save-locations',()=>folder('/home',['child','sibling']));await h.openSave();const child=h.get('save-folders').children[0];let fail=true;
+ h.set('save-locations',req=>{if(fail)throw Error('Folder unavailable');return folder(req.Path)});
+ await child.click();assert.match(h.get('save-error').textContent,/Folder unavailable/);assert.equal(h.get('save-path').value,'/home');assert.equal(h.get('save-folders').children[0],child);assert.equal(child.disabled,false);
+ fail=false;const calls=h.calls('save-locations').length;await h.get('save-folders').children[retryName==='child'?0:1].click();assert.equal(h.calls('save-locations').length,calls+1);assert.equal(h.get('save-path').value,'/home/'+retryName);assert.equal(h.get('save-error').textContent,'');
+ }
+});
+
+test('displayed save-folder controls disable during navigation and detached controls cannot replace a new listing',async()=>{
+ const h=await setup();await h.openSave();const child=h.get('save-folders').children[0],pending=deferred();h.set('save-locations',()=>pending.promise);const navigation=child.click();
+ assert.equal(child.disabled,true);const count=h.calls('save-locations').length;await child.click();assert.equal(h.calls('save-locations').length,count,'handler must also reject pending activation');
+ pending.resolve(folder('/new',['new-child']));await navigation;const current=h.get('save-folders').children[0];assert.equal(current.disabled,false);await child.click();assert.equal(h.calls('save-locations').length,count,'detached old listings cannot navigate');
+});
+
 test('one connection draft submits once while pending and releases the guard after a failed save',async()=>{
  const h=await setup(),slow=deferred();h.edit();h.set('save',()=>slow.promise);const first=h.submit();await h.submit();assert.equal(h.calls('save').length,1);assert.equal(h.get('connection-save').disabled,true);
  slow.reject(Error('Vault locked'));await first;assert.equal(h.get('connection-error').textContent,'Vault locked');assert.equal(h.get('connection-save').disabled,false);

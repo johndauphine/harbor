@@ -196,6 +196,7 @@ let savingDownload=false,saveTransfer=null,saveDirectory=null,saveGeneration=0,s
 function updateSaveControls(){
  $('save-confirm').disabled=savingDownload||saveFolderPending;$('save-cancel').disabled=savingDownload;
  $('save-home').disabled=savingDownload;$('save-up').disabled=savingDownload||!saveDirectory;$('save-go').disabled=savingDownload;$('save-path').disabled=savingDownload;
+ for(const folder of $('save-folders').children)folder.disabled=savingDownload||saveFolderPending;
 }
 function invalidateSaveFolder(){saveFolderRequest++;saveFolderPending=false;saveDirectory=null;$('save-folders').replaceChildren();updateSaveControls()}
 function closeSaveDownload(){saveGeneration++;invalidateSaveFolder();saveTransfer=null;$('save-dialog').close()}
@@ -205,7 +206,7 @@ async function loadSaveFolder(path=''){
  saveFolderPending=true;updateSaveControls();$('save-error').textContent='';
  try{
  const locations=await api('save-locations',{Path:path});if(!isCurrent())return;saveDirectory=locations;$('save-path').value=locations.Path;
- $('save-folders').replaceChildren(...locations.Folders.map(name=>button('▸ '+name,async()=>{if(!isCurrent())return;const separator=locations.Path.includes('\\')?'\\':'/';await loadSaveFolder(locations.Path.replace(/[\\/]$/,'')+separator+name)})));
+ $('save-folders').replaceChildren(...locations.Folders.map(name=>button('▸ '+name,async()=>{if(generation!==saveGeneration||!$('save-dialog').open||saveDirectory!==locations||saveFolderPending||savingDownload)return;const separator=locations.Path.includes('\\')?'\\':'/';await loadSaveFolder(locations.Path.replace(/[\\/]$/,'')+separator+name)})));
  if(!locations.Folders.length)$('save-folders').textContent='No subfolders — you can save here.';
  }catch(e){if(isCurrent())$('save-error').textContent=e.message}
  finally{if(isCurrent()){saveFolderPending=false;updateSaveControls()}}
@@ -426,10 +427,10 @@ $('delete-review').onclick=action(async()=>{const state=deleteState;if(!state)re
 async function deleteSelectedFiles(state){
  const failed=[];let deleted=0,refreshWarning='';
  for(const o of state.files){$('delete-summary').textContent='Deleting objects… '+(deleted+failed.length)+' of '+state.files.length+' processed';try{await api('delete-file',{ProfileID:state.target.ProfileID,Bucket:state.target.Bucket,Key:o.Key,ETag:o.ETag,ConnectionIdentity:state.target.ConnectionIdentity});deleted++}catch(e){failed.push({key:o.Key,error:e.message})}}
- if(currentListing(state.target)){
+ if(currentListing(state.target)&&listingContext?.ConnectionIdentity===state.target.ConnectionIdentity){
   selectedKeys=new Set(failed.map(f=>f.key));updateSelection();
   try{await browse()}catch(e){refreshWarning='Listing refresh failed: '+e.message}
-  if(currentListing(state.target)){selectedKeys=new Set(failed.map(f=>f.key));updateSelection()}
+  if(currentListing(state.target)&&listingContext?.ConnectionIdentity===state.target.ConnectionIdentity){selectedKeys=new Set(failed.map(f=>f.key));updateSelection()}
  }
  const summary='Deleted '+deleted+' file'+(deleted===1?'':'s')+(failed.length?' · Failed: '+failed.map(f=>f.key+': '+f.error).join(' · '):'')+(refreshWarning?' · '+refreshWarning:'');
  renderDeleteRows(state.files.map(o=>({key:o.Key,type:'Object',size:formatBytes(o.Size),status:failed.some(f=>f.key===o.Key)?'Failed':'Deleted'})));state.files=state.files.filter(o=>failed.some(f=>f.key===o.Key));showDeleteResults(state,summary,failed.map(f=>f.key+': '+f.error).join('\n'),failed.length>0);message(summary);
@@ -526,7 +527,7 @@ $('path').onkeydown=e=>{
  if(e.key==='Tab'&&!e.shiftKey&&pathMatches.length){
   if(pathActive>=0){e.preventDefault();choosePath(pathMatches[pathActive]);return}
   if(pathHasMore){message('More matching names are available. Type more or load more matches before completing.');return}
-  if(pathMatches.length===1){e.preventDefault();choosePath(pathMatches[0]);return}
+  if(pathMatches.length===1){if(pathMatches[0].Key!==$('path').value){e.preventDefault();choosePath(pathMatches[0])}return}
   let shared=pathMatches[0].Key;
   for(const match of pathMatches.slice(1)){while(!match.Key.startsWith(shared))shared=shared.slice(0,-1)}
   if(shared.length>$('path').value.length){e.preventDefault();$('path').value=shared;suggestPaths()}
