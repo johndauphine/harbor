@@ -1,4 +1,6 @@
 build/bin/
+build/tools/
+*-res.syso
 frontend/wailsjs/
 *.log
 .DS_Store

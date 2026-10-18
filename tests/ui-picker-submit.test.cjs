@@ -100,7 +100,8 @@ function fixtureAPI() {
    const folder = request.Path || '/fixture/upload';
    value = {Path: folder, Home: '/fixture/upload', Parent: '/fixture/upload', Folders: folder === '/fixture/upload' ? ['subfolder'] : [], Files: [{Name: 'upload.txt', Size: 4}]};
   } else if (route === 'download') { fixture.downloads.push(request); value = {ID: 'fixture-download', Path: request.Path + '/' + request.Name}; }
-  else if (route === 'upload-local') { fixture.uploads.push(request); value = 'fixture-upload'; }
+  else if (route === 'upload-local') { if(fixture.onUpload)await fixture.onUpload(request);fixture.uploads.push(request); value = 'fixture-upload'; }
+  else if (route === 'desktop-upload-pick') { value=fixture.onPicker?await fixture.onPicker(request):[]; }
   else if (route === 'transfers') { if(fixture.onTransfers) await fixture.onTransfers(); value = []; }
   else throw Error('Unexpected fixture route: ' + route);
   return {ok: true, json: async () => value};
@@ -170,9 +171,10 @@ async function exerciseUpload(document, fixture, check) {
  check(!get('upload-dialog').open,'Successful uploads close the workspace');
 }
 
-async function modelFixture() {
+async function modelFixture(native=false) {
  const document = modelDocument(), fixture = fixtureAPI();
  const context = {document, fetch: fixture.fetch, confirm: fixture.confirm, location: {hash: '#fixture', pathname: '/'}, sessionStorage: {getItem() {}, setItem() {}}, history: {replaceState() {}}, setInterval() {}, setTimeout, clearTimeout, URL, URLSearchParams};
+ if(native)context.window={runtime:{}};
  vm.createContext(context); vm.runInContext(source, context);
  recordSubmissions(document, fixture); await selectFixture(document);
  return {document, fixture, context};
@@ -190,6 +192,35 @@ test('default-submit model activates before an async click handler finishes', as
  assert.deepEqual(events, [], 'preventDefault suppresses submission');
  button.onclick = undefined; button.disabled = true; button.click();
  assert.deepEqual(events, [], 'disabled buttons do not activate');
+});
+
+test('desktop folder picker stages by local path, preserves nested keys and retries failed preparation',async()=>{
+ const {document,fixture}=await modelFixture(true),get=id=>document.getElementById(id);
+ fixture.onPicker=async request=>{assert.equal(request.Folder,true);return [{name:'large.bin',size:731*1024**2,path:'Downloads/nested/large.bin',localPath:'C:\\Downloads\\nested\\large.bin'}]};
+ get('upload').click();await get('upload-add-folder').onclick();
+ assert.equal(get('upload-rows').children.length,1);assert.equal(fixture.uploads.length,0);
+ fixture.onUpload=async()=>{throw Error('File is no longer available')};
+ await get('upload-form').onsubmit({preventDefault(){}});
+ assert.match(get('upload-error').textContent,/File is no longer available/);assert.equal(get('upload-confirm').disabled,false);
+ fixture.onUpload=null;await get('upload-form').onsubmit({preventDefault(){}});
+ assert.equal(fixture.uploads.length,1);assert.equal(fixture.uploads[0].Key,'Downloads/nested/large.bin');assert.equal(fixture.uploads[0].Path,'C:\\Downloads\\nested\\large.bin');assert.equal(fixture.uploads[0].file,undefined);
+ assert.equal(get('upload-dialog').open,false);
+});
+
+test('desktop picker errors and late results leave the dialog usable',async()=>{
+ const {document,fixture}=await modelFixture(true),get=id=>document.getElementById(id);
+ get('upload').click();fixture.onPicker=async()=>{throw Error('Cannot read folder')};
+ await get('upload-add-folder').onclick();assert.match(get('upload-error').textContent,/Cannot read folder/);assert.equal(get('upload-add-folder').disabled,false);
+ let release;fixture.onPicker=()=>new Promise(resolve=>release=resolve);
+ const pending=get('upload-add-folder').onclick();await settle();get('upload-cancel').click();get('upload').click();
+ release([{name:'late.txt',size:1,path:'Downloads/late.txt',localPath:'C:\\Downloads\\late.txt'}]);await pending;
+ assert.equal(get('upload-dialog').open,true);assert.equal(get('upload-rows').children.length,0);assert.equal(get('upload-add-folder').disabled,false);
+});
+
+test('desktop large dropped files direct users to native pickers before reading bytes',async()=>{
+ const {document,fixture}=await modelFixture(true),get=id=>document.getElementById(id);
+ get('upload').click();pickUpload(document,'upload-file-input',[{name:'large.bin',size:731*1024**2}]);
+ assert.equal(get('upload-rows').children.length,0);assert.match(get('upload-error').textContent,/use Add files or Add folder/);assert.equal(fixture.uploads.length,0);
 });
 
 test('Save folder buttons navigate without submitting; Save here queues the chosen folder (DOM activation model)', async () => {

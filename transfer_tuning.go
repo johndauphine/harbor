@@ -15,6 +15,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/smithy-go/middleware"
+	smithyhttp "github.com/aws/smithy-go/transport/http"
 )
 
 var errCheckpointPersistence = errors.New("Save transfer recovery state")
@@ -199,7 +200,46 @@ func (a *App) tuneClient(c *s3.Client, p Profile) *s3.Client {
 	}
 	clone := *client
 	clone.Transport = &tuningRoundTripper{next: client.Transport, app: a, scope: tuningScope(p)}
-	return s3.New(options, func(o *s3.Options) { o.HTTPClient = &clone })
+	return s3.New(options, func(o *s3.Options) {
+		o.HTTPClient = &clone
+		o.APIOptions = append(o.APIOptions, func(stack *middleware.Stack) error {
+			// Inside Retry, so each attempt waits before generating a fresh signature.
+			return stack.Finalize.Insert(&tuningAdmissionMiddleware{app: a, scope: tuningScope(p)}, "Signing", middleware.Before)
+		})
+	})
+}
+
+type tuningAdmissionKey struct{}
+type tuningAdmission struct {
+	lease   *transferLease
+	state   *appTransferTuning
+	class   transferRequestClass
+	started time.Time
+	claimed atomic.Bool
+}
+type tuningAdmissionMiddleware struct {
+	app   *App
+	scope string
+}
+
+func (*tuningAdmissionMiddleware) ID() string { return "HarborTransferAdmission" }
+func (m *tuningAdmissionMiddleware) HandleFinalize(ctx context.Context, in middleware.FinalizeInput, next middleware.FinalizeHandler) (out middleware.FinalizeOutput, metadata middleware.Metadata, err error) {
+	request, ok := in.Request.(*smithyhttp.Request)
+	if !ok {
+		return out, metadata, errors.New("Unsupported storage request transport")
+	}
+	admission, err := m.app.admitTuningRequest(request.Request.WithContext(ctx), m.scope)
+	if err != nil {
+		return out, metadata, err
+	}
+	// Signing/authentication may fail before HTTP sees the request. In that case
+	// there is no response body to release the lease on our behalf.
+	defer func() {
+		if !admission.claimed.Load() {
+			admission.lease.Release()
+		}
+	}()
+	return next.HandleFinalize(context.WithValue(ctx, tuningAdmissionKey{}, admission), in)
 }
 
 type tuningRoundTripper struct {
@@ -208,9 +248,9 @@ type tuningRoundTripper struct {
 	scope string
 }
 
-func (t *tuningRoundTripper) RoundTrip(r *http.Request) (*http.Response, error) {
-	t.app.sampleTransferResources()
-	state := t.app.tuning()
+func (a *App) admitTuningRequest(r *http.Request, scope string) (*tuningAdmission, error) {
+	a.sampleTransferResources()
+	state := a.tuning()
 	op := middleware.GetOperationName(r.Context())
 	identity, hasIdentity := r.Context().Value(tuningContextKey{}).(tuningIdentity)
 	bulk := op == "GetObject" || op == "UploadPart" || op == "PutObject"
@@ -219,7 +259,7 @@ func (t *tuningRoundTripper) RoundTrip(r *http.Request) (*http.Response, error) 
 	if op == "PutObject" && !hasIdentity && r.ContentLength == 0 {
 		bulk = false
 	}
-	class := transferRequestClass{Scope: t.scope, Control: !bulk}
+	class := transferRequestClass{Scope: scope, Control: !bulk}
 	if hasIdentity {
 		class.TransferID = identity.id
 		class.Direction = identity.direction
@@ -236,6 +276,21 @@ func (t *tuningRoundTripper) RoundTrip(r *http.Request) (*http.Response, error) 
 	if err != nil {
 		return nil, err
 	}
+	return &tuningAdmission{lease: lease, state: state, class: class, started: started}, nil
+}
+
+func (t *tuningRoundTripper) RoundTrip(r *http.Request) (*http.Response, error) {
+	admission, _ := r.Context().Value(tuningAdmissionKey{}).(*tuningAdmission)
+	if admission == nil {
+		// Also support direct transport callers. SDK clients always admit before signing.
+		var err error
+		admission, err = t.app.admitTuningRequest(r, t.scope)
+		if err != nil {
+			return nil, err
+		}
+	}
+	admission.claimed.Store(true)
+	lease, state, class, started := admission.lease, admission.state, admission.class, admission.started
 	networkStarted := time.Now()
 	state.mu.Lock()
 	state.attempts++
